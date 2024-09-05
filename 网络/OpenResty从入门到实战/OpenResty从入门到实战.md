@@ -12,6 +12,14 @@
 
 
 
+## 一些资料
+
+官网： https://openresty.org/cn/installation.html
+
+
+
+
+
 # 开篇词 | OpenResty，为你打开高性能开发的大门
 
 ​		你好，我是温铭，OpenResty 软件基金会主席，曾任某开源商业公司合伙人，前 360 开源技术委员会委员，在互联网安全公司工作了 10 年，负责开发过云查杀、反钓鱼和企业安全产品。接下来的几个月，我会带着你系统地学习一下 OpenResty。
@@ -121,3 +129,294 @@ OpenResty 是在 **NGINX 和 LuaJIT 的基础**上搭建的，所以我们肯定
 
 
 万尺高楼平地起，接下来，我会和你一起来逐步掌握 OpenResty，Enjoy！
+
+
+
+# 入门篇
+
+## 01 | 初探OpenResty的三大特性
+
+### OpenResty 的发展
+
+OpenResty 并不像其他的开发语言一样从零开始搭建，而是**基于成熟的开源组件——NGINX 和 LuaJIT**。
+
+OpenResty 诞生于 2007 年，不过，它的**第一个版本并没有选择 Lua，而是用了 Perl**，这跟作者**章亦春**的技术偏好有很大关系。
+
+
+
+但 Perl 的性能远远不能达到要求，于是，在第二个版本中，Perl 就被 Lua 给替换了。 不过，**在 OpenResty 官方的项目中，Perl 依然占据着重要的角色，OpenResty 工程化方面都是用 Perl 来构建，比如测试框架、Linter、CLI 等**，后面我们也会逐步介绍。
+
+
+
+后来，章亦春离开了淘宝，加入了美国的 CDN 公司 Cloudflare。因为 OpenResty 高性能和动态的优势很适合 CDN 的业务需求，很快， OpenResty 就成为 CDN 的技术标准。 通过丰富的 lua-resty 库，OpenResty 开始逐渐摆脱 NGINX 的影子，形成自己的生态体系，在 API 网关、**软 WAF（软件 Web 应用程序防火墙（Web Application Firewall）** 等领域被广泛使用。
+
+
+
+其实，我经常说，OpenResty 是一个被广泛使用的技术，但它并不能算得上是热门技术，这听上去有点矛盾，到底什么意思呢？
+
+说它应用广，是因为 OpenResty 现在是全球排名第五的 Web 服务器。我们经常用到的 **12306 的余票查询功能，或者是京东的商品详情页**，这些高流量的背后，其实都是 OpenResty 在默默地提供服务。
+
+
+
+说它并不热门，那是因为使用 OpenResty 来构建业务系统的比例并不高。使用者大都用 OpenResty 来处理入口流量，并没有深入到业务里面去，自然，对于 OpenResty 的使用也是浅尝辄止，满足当前的需求就可以了。这当然也与 OpenResty 没有像 Java、Python 那样有成熟的 Web 框架和生态有关。
+
+
+
+说了这么多，接下来，我重点来介绍下，OpenResty 这个开源项目值得称道和学习的几个地方。
+
+
+
+
+
+### OpenResty 的三大特性
+
+#### 详尽的文档和测试用例
+
+没错，文档和测试是判断开源项目是否靠谱的关键指标，甚至是排在代码质量和性能之前的。
+
+OpenResty 的文档非常详细，作者把每一个需要注意的点都写在了文档中。绝大部分时候，我们只需要仔细查看文档，就能解决遇到的问题，而不用谷歌搜索或者是跟踪到源码中。为了方便起见，OpenResty 还自带了一个命令行工具`restydoc`，专门用来帮助你通过 shell 查看文档，避免编码过程被打断。
+
+
+
+不过，文档中只会有一两个通用的代码片段，并没有完整和复杂的示例，到哪里可以找到这样的例子呢？
+
+对于 OpenResty 来说，自然是`/t`目录，它里面就是所有的测试案例。每一个测试案例都包含完整的 NGINX 配置和 Lua 代码，以及测试的输入数据和预期的输出数据。不过，OpenResty 使用的测试框架，与其他断言风格的测试框架完全不同，后面我会用专门章节来做介绍。
+
+
+
+#### 同步非阻塞
+
+协程，是很多脚本语言为了提升性能，在近几年新增的特性。但它们实现得并不完美，有些是**语法糖**，有些还需要显式的关键字声明。
+
+
+
+OpenResty 则没有历史包袱，在诞生之初就支持了协程，并基于此实现了**同步非阻塞**的编程模式。这一点是很重要的，毕竟，程序员也是人，代码应该更符合人的思维习惯。显式的回调和异步关键字会打断思路，也给调试带来了困难。
+
+
+
+这里我解释一下，什么是同步非阻塞。先说同步，这个很简单，就是按照代码来顺序执行。比如下面这段伪码：
+
+```lua
+local res, err  = query-mysql(sql)
+local value, err = query-redis(key)
+```
+
+在同一请求连接中，如果要等 MySQL 的查询结果返回后，才能继续去查询 Redis，那就是同步；如果不用等 MySQL 的返回，就能继续往下走，去查询 Redis，那就是异步。对于 OpenResty 来说，绝大部分都是同步操作，只有 `ngx.timer` 这种后台定时器相关的 API，才是异步操作。
+
+
+
+再来说说非阻塞，这是一个很容易和“异步”混淆的概念。**这里我们说的“阻塞”，特指阻塞操作系统线程**。我们继续看上面的例子，假设查询 MySQL 需要 1s 的时间，如果在这 1s 内，操作系统的资源（CPU）是空闲着并傻傻地等待返回，那就是阻塞；如果 CPU 趁机去处理其他连接的请求，那就是非阻塞。非阻塞也是 C10K（"Concurrent 10,000 Connections）、C100K 这些高并发能够实现的关键。
+
+
+
+同步非阻塞这个概念很重要，建议你仔细琢磨一下。我认为，这一概念最好不要通过类比来理解，因为不恰当的类比，很可能把你搞得更糊涂。
+
+在 OpenResty 中，上面的伪码就可以直接实现同步非阻塞，而不用任何显式的关键字。这里也再次体现了，让开发者用起来更简单，是 OpenResty 的理念之一。
+
+
+
+#### 动态
+
+OpenResty 有一个非常大的优势，并且还没有被充分挖掘，就是它的**动态**。
+
+
+
+传统的 Web 服务器，比如 NGINX，如果发生任何的变动，都需要你去修改磁盘上的配置文件，然后重新加载才能生效，这也是因为它们并没有提供 API，来控制运行时的行为。
+
+所以，在需要频繁变动的微服务领域，NGINX 虽然有多次尝试，但毫无建树。而**异军突起的 Envoy， 正是凭着 xDS 这种动态控制的 API**，大有对 NGINX 造成降维攻击的威胁。
+
+
+
+和 NGINX 、 Envoy 不同的是，OpenResty 是由脚本语言 Lua 来控制逻辑的，而动态，便是 Lua 天生的优势。通过 OpenResty 中 lua-nginx-module 模块中提供的 Lua API，我们可以动态地控制路由、上游、SSL 证书、请求、响应等。甚至更进一步，你可以在不重启 OpenResty 的前提下，修改业务的处理逻辑，并不局限于 OpenResty 提供的 Lua API。
+
+
+
+这里有一个很合适的类比，可以帮你理解上面关于动态的说明。你可以把 Web 服务器当做是一个正在高速公路上飞驰的汽车，NGINX 需要停车才能更换轮胎，更换车漆颜色；Envoy 可以一边跑一边换轮胎和颜色；而 OpenResty 除了具备前者能力外，还可以在不停车的情况下，直接把汽车从 SUV 变成跑车。
+
+
+
+显然，掌握这种“逆天”的能力后，OpenResty 的能力圈和想象力就扩展到了其他领域，比如  Serverless 和边缘计算等。
+
+
+
+
+
+### 你学习的重点在哪里？
+
+讲了这么多 OpenResty 的重点特性，你又该怎么学呢？我认为，学习需要抓重点，围绕主线来展开，而不是眉毛胡子一把抓，这样，你才能构建出脉络清晰的知识体系。
+
+要知道，不管多么全面的课程，都不可能覆盖所有问题，更不能直接帮你解决线上的每个 bug 和异常。
+
+回到 OpenResty 的学习，在我看来，想要学好 OpenResty，你必须理解下面 8 个重点：
+
+- 同步非阻塞的编程模式；
+- 不同阶段的作用；
+- LuaJIT 和 Lua 的不同之处；
+- OpenResty API 和周边库；
+- 协程和 cosocket；
+- 单元测试框架和性能测试工具；
+- 火焰图和周边工具链；
+- 性能优化。
+
+这些内容正是我们学习的重点，在专栏的各个模块中我都会分别讲到。在学习的过程中，我希望你能举一反三，并且根据自己的兴趣点和背景，有针对性地深入阅读某些章节。
+
+
+
+如果你是 OpenResty 的初学者，那么你可以完全跟着专栏的进度，在自己的环境中安装 OpenResty，运行并修改示例代码。要记住，你的重点在于构建 OpenResty 的全貌，而非死磕某个知识点。当然，如果你有疑问的地方，随时可以在留言区提出，我会解答你的困惑。
+
+如果你正在项目中使用 OpenResty，那就太棒了，相信你在阅读 LuaJIT 和性能优化章节时，一定会有更多的共鸣，更能应用到实际，在你的项目中看到优化前后的性能指标变化。
+
+另外，如果你想要给 OpenResty 以及周边库贡献代码，那么最大的门槛，并不是对 OpenResty 原理的理解，或者是如何编写 NGINX C 模块的问题，而是测试案例和代码规范。我见过太多 OpenResty 的代码贡献者（也包括我自己），在一个 PR 上反复修改测试案例和代码风格，这其中有太多鲜为人知的潜规则。所以，专栏的代码规范和单元测试部分，就是为你准备的。
+
+而如果你是测试工程师，即使你不使用 OpenResty，OpenResty 的测试框架和性能分析工具集，也必能给你非常多的启发。毕竟，OpenResty 在测试上面的投入和积累是相当深厚的。
+
+
+
+## 02 | 如何写出你的“hello world”？
+
+每当我们开始学习一个新的开发语言或者平台，都会从最简单的`hello world`开始，OpenResty 也不例外。让我们先跳过安装的步骤，直接看下，最简单的 OpenResty 程序是怎么编写和运行的：
+
+```
+$ resty -e "ngx.say('hello world')"
+hello world
+```
+
+这应该是你见过的最简单的那种 hello world 代码写法，和 Python 类似：
+
+```
+$ python -c 'print("hello world")'
+hello world
+```
+
+
+
+这背后其实是 OpenResty 哲学的一种体现，代码要足够简洁，也好让你打消“从入门到放弃“的念头。我们今天的内容，就专门围绕着这行代码来展开聊一聊。
+
+
+
+上一节我们讲过，OpenResty 是基于 NGINX 的。那你现在是不是有一个疑问：为什么这里看不到 NGINX 的影子？别着急，我们加一行代码，看看 `resty`背后真正运行的是什么：
+
+```
+resty -e "ngx.say('hello world'); ngx.sleep(10)" &
+```
+
+我们加了一行 sleep 休眠的代码，让 resty 运行的程序打印出字符串后，并不退出。这样，我们就有机会一探究竟：
+
+```
+$ ps -ef | grep nginx
+501 25468 25462   0  7:24下午 ttys000    0:00.01 /usr/local/Cellar/openresty/''1.13.6.2/nginx/sbin/nginx -p /tmp/resty_AfNwigQVOB/ -c conf/nginx.conf
+```
+
+终于看了熟悉的 NGINX 进程。看来，`resty` 本质上是启动了一个 NGINX 服务，那么`resty` 又是一个什么程序呢？我先卖个关子，咱后面再讲。
+
+你的机器上可能还没有安装 OpenResty，所以，接下来，我们先回到开头跳过的安装步骤，把 OpenResty 安装完成后再继续。
+
+
+
+## OpenResty 的安装
+
+> 具体见 https://openresty.org/cn/installation.html 和 https://openresty.org/cn/linux-packages.html#tencentos-linux
+
+```bash
+# 新增仓库
+wget https://openresty.org/package/tlinux/openresty.repo
+sudo mv openresty.repo /etc/yum.repos.d/
+
+# 更新索引
+sudo yum check-update
+
+# 然后你就可以像下面这样安装包了，比如说安装 openresty：
+yum install -y openresty
+
+# 如果想安装 resty 命令行工具，则像下面这样安装 openresty-resty 软件包：
+yum install -y openresty-resty
+
+# resty -v
+resty 0.29
+nginx version: openresty/1.25.3.2
+built by gcc 8.5.0 20210514 (Red Hat 8.5.0-22) (GCC) 
+built with OpenSSL 1.1.1w  11 Sep 2023
+```
+
+
+
+和其他的开源软件一样，OpenResty 的安装有多种方法，比如使用操作系统的包管理器、源码编译或者 docker 镜像。我推荐你优先使用 yum、apt-get、brew 这类**包管理系统**，来安装 OpenResty。这里我们使用 Mac 系统来做示例：
+
+```
+brew tap openresty/brew
+brew install openresty
+```
+
+
+
+使用其他操作系统也是类似的，先要在包管理器中添加 OpenResty 的仓库地址，然后用包管理工具来安装。具体步骤，你可以参考[官方文档](https://openresty.org/en/linux-packages.html)。
+
+
+
+不过，这看似简单的安装背后，其实有两个问题：
+
+
+
+- 为什么我不推荐使用源码来安装呢？
+- 为什么不能直接从操作系统的官方仓库安装，而是需要先设置另外一个仓库地址？
+
+
+
+对于这两个问题，你不妨先自己想一想。
+
+
+
+这里我想补充一句。在这门课程里面，我会在表象背后提出很多的“为什么”，希望你可以一边学新东西一边思考，结果是否正确并不重要。独立思考在技术领域也是稀缺的，由于每个人技术领域和深度的不同，在任何课程中老师都会不可避免地带有个人观点以及知识的错漏。只有在学习过程中多问几个为什么，融会贯通，才能逐渐形成自己的技术体系。
+
+
+
+很多工程师都有源码的情节，多年前的我也是一样。在使用一个开源项目的时候，我总是希望能够自己手工从源码开始 configure 和 make，并修改一些编译参数，感觉这样做才能最适合这台机器的环境，才能把性能发挥到极致。
+
+
+
+但现实并非如此，每次源码编译，我都会遇到各种诡异的环境问题，磕磕绊绊才能安装好。现在我想明白了，我们的最初目的其实是用开源项目来解决业务需求，不应该浪费时间和环境鏖战，更何况包管理器和容器技术，正是为了帮我们解决这些问题。
+
+言归正传，给你说说我的看法。使用 OpenResty 源码安装，不仅仅步骤繁琐，需要自行解决 PCRE、OpenSSL 等外部依赖，而且还需要手工对 OpenSSL 打上对应版本的补丁。不然就会在处理 SSL session 时，带来功能上的缺失，比如像`ngx.sleep`这类会导致 yield 的 Lua API 就没法使用。这部分内容如果你还想深入了解，可以参考[[官方文档](https://github.com/openresty/lua-nginx-module#ssl_session_fetch_by_lua_block)]来获取更详细的信息。
+
+从 OpenResty 自己维护的 OpenSSL [[打包脚本](https://github.com/openresty/openresty-packaging/blob/master/rpm/SPECS/openresty-openssl.spec)]中，就可以看到这些补丁。而在 OpenResty 升级 OpenSSL 版本时，都需要重新生成对应的补丁，并进行完整的回归测试。
+
+```
+Source0: https://www.openssl.org/source/openssl-%{version}.tar.gz
+
+Patch0: https://raw.githubusercontent.com/openresty/openresty/master/patches/openssl-1.1.0d-sess_set_get_cb_yield.patch
+Patch1: https://raw.githubusercontent.com/openresty/openresty/master/patches/openssl-1.1.0j-parallel_build_fix.patch
+
+```
+
+同时，我们可以看下 OpenResty 在 CentOS 中的[[打包脚本\]](https://github.com/openresty/openresty-packaging/blob/master/rpm/SPECS/openresty.spec)，看看是否还有其他隐藏的点：
+
+```
+BuildRequires: perl-File-Temp
+BuildRequires: gcc, make, perl, systemtap-sdt-devel
+BuildRequires: openresty-zlib-devel >= 1.2.11-3
+BuildRequires: openresty-openssl-devel >= 1.1.0h-1
+BuildRequires: openresty-pcre-devel >= 8.42-1
+Requires: openresty-zlib >= 1.2.11-3
+Requires: openresty-openssl >= 1.1.0h-1
+Requires: openresty-pcre >= 8.42-1
+
+```
+
+
+
+从这里可以看出，OpenResty 不仅维护了自己的 OpenSSL 版本，还维护了自己的 zlib 和 PCRE 版本。不过后面两个只是调整了编译参数，并没有维护自己的补丁。
+
+
+
+所以，综合这些因素，我不推荐你自行源码编译 OpenResty，除非你已经很清楚这些细节。
+
+为什么不推荐源码安装，你现在应该已经很清楚了。
+
+其实我们在回答第一个问题时，也顺带回答了第二个问题：为什么不能直接从操作系统的官方仓库安装，而是需要先设置另外一个仓库地址？
+
+这因为，**官方仓库不愿意接受第三方维护的 OpenSSL、PCRE 和 zlib 包，这会导致其他使用者的困惑，不知道选用哪一个合适。另一方面，OpenResty 又需要指定版本的 OpenSSL、PCRE 库才能正常运行**，而系统默认自带的版本都比较旧。
+
+
+
+
+
