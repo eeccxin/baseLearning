@@ -313,7 +313,7 @@ $ ps -ef | grep nginx
 
 
 
-## OpenResty 的安装
+### OpenResty 的安装
 
 > 具体见 https://openresty.org/cn/installation.html 和 https://openresty.org/cn/linux-packages.html#tencentos-linux
 
@@ -418,5 +418,168 @@ Requires: openresty-pcre >= 8.42-1
 
 
 
+### OpenResty CLI
+
+安装完 OpenResty 后，默认就已经把 OpenResty 的 CLI：`resty` 安装好了。`resty`是个 1000 多行的 Perl 脚本，之前我们提到过，OpenResty 的周边工具都是 Perl 编写的，这个是由 OpenResty 作者的技术偏好决定的。
+
+```
+$ which resty
+/usr/local/bin/resty
+$ head -n 1 /usr/local/bin/resty
+ #!/usr/bin/env perl
+```
 
 
+
+`resty` 的功能很强大，想了解完整的列表，你可以查看`resty -h`或者[[官方文档](https://github.com/openresty/resty-cli)]。下面，我挑两个有意思的功能介绍一下。
+
+```bash
+# resty --shdict='dogs 1m' -e 'local dict = ngx.shared.dogs
+> dict:set("Tom", 56)
+> print(dict:get("Tom"))'
+56
+```
+
+先来看第一个例子。这个示例结合了 NGINX 配置和 Lua 代码，一起完成了一个共享内存字典的设置和查询。`dogs 1m` 是 NGINX 的一段配置，声明了一个共享内存空间，名字是 dogs，大小是 1m；在 Lua 代码中用字典的方式使用共享内存。另外还有`--http-include` 和 `--main-include`来设置 NGINX 配置文件。所以，上面的例子也可以写为：
+
+```bash
+# resty --http-conf 'lua_shared_dict dogs 1m;' -e 'local dict = ngx.shared.dogs
+                               dict:set("Tom", 56)
+                               print(dict:get("Tom"))'
+56
+```
+
+
+
+OpenResty 世界中常用的调试工具，比如`gdb`、`valgrind`、`sysetmtap`和`Mozilla rr` ，也可以和 `resty` 一起配合使用，方便你平时的开发和测试。它们分别对应着 `resty` 不同的指令，内部的实现其实很简单，就是多套了一层命令行调用。我们以 valgrind 为例：
+
+```bash
+# resty --valgrind  -e "ngx.say('hello world'); "
+==4007202== Memcheck, a memory error detector
+==4007202== Copyright (C) 2002-2022, and GNU GPL'd, by Julian Seward et al.
+==4007202== Using Valgrind-3.19.0 and LibVEX; rerun with -h for copyright info
+==4007202== Command: /usr/local/openresty/nginx/sbin/nginx -g #\ -e\ 'ngx.say('hello\ world');\ ' -p /tmp/resty_DIsBMVnSPi/ -c conf/nginx.conf
+==4007202== 
+hello world
+==4007202== 
+==4007202== HEAP SUMMARY:
+==4007202==     in use at exit: 45,670 bytes in 152 blocks
+==4007202==   total heap usage: 4,824 allocs, 4,672 frees, 885,697 bytes allocated
+==4007202== 
+==4007202== LEAK SUMMARY:
+==4007202==    definitely lost: 392 bytes in 1 blocks
+==4007202==    indirectly lost: 16 bytes in 1 blocks
+==4007202==      possibly lost: 128 bytes in 1 blocks
+==4007202==    still reachable: 45,134 bytes in 149 blocks
+==4007202==         suppressed: 0 bytes in 0 blocks
+==4007202== Rerun with --leak-check=full to see details of leaked memory
+==4007202== 
+==4007202== For lists of detected and suppressed errors, rerun with: -s
+==4007202== ERROR SUMMARY: 0 errors from 0 contexts (suppressed: 0 from 0)
+
+
+
+# 原文的输出
+ERROR: failed to run command "valgrind /usr/local/Cellar/openresty/1.13.6.2/nginx/sbin/nginx -p /tmp/resty_hTFRsFBhVl/ -c conf/nginx.conf": No such file or directory
+
+```
+
+在后面调试、测试和性能分析的章节，会涉及到这些工具的使用。它们不仅适用于 OpenResty 世界，也是服务端的通用工具，让我们循序渐进地来学习吧。
+
+
+
+### 更正式的 hello world
+
+最开始我们使用`resty`写的第一个 OpenResty 程序，没有 master 进程，也不会监听端口。下面，让我们写一个更正式的 hello world。
+
+写出这样的 OpenResty 程序并不简单，你至少需要三步才能完成：
+
+- 创建工作目录；
+- 修改 NGINX 的配置文件，把 Lua 代码嵌入其中；
+- 启动 OpenResty 服务。
+
+我们先来创建工作目录。
+
+```
+mkdir geektime
+cd geektime
+mkdir logs/ conf/
+```
+
+下面是一个最简化的 `nginx.conf`，在根目录下新增 OpenResty 的`content_by_lua`指令，里面嵌入了`ngx.say`的代码：
+
+```
+events {
+    worker_connections 1024;
+}
+
+http {
+    server {
+        listen 8080;
+        location / {
+            content_by_lua '
+                ngx.say("hello, world")
+            ';
+        }
+    }
+}
+
+```
+
+
+
+请先确认下，是否已经把`openresty`加入到`PATH`环境中；然后，启动 OpenResty 服务就可以了：
+
+```
+openresty -p `pwd` -c conf/nginx.conf
+
+==》对应进程
+root     4011431       1  0 20:49 ?        00:00:00 nginx: master process openresty -p /data/geektime -c conf/nginx.conf
+```
+
+没有报错的话，OpenResty 的服务就已经成功启动了。你可以打开浏览器，或者使用 curl 命令，来查看结果的返回：
+
+```
+$ curl -i 127.0.0.1:8080
+HTTP/1.1 200 OK
+Server: openresty/1.13.6.2
+Content-Type: text/plain
+Transfer-Encoding: chunked
+Connection: keep-alive
+
+hello, world
+
+```
+
+到这里，恭喜你，一个真正的 OpenResty 程序就完成了。
+
+### 总结
+
+让我们回顾下今天讲的内容。我们通过一行简单的 `hello, world` 代码，延展到 OpenResty 的安装和 CLI，并在最后启动了 OpenResty 进程，运行了一个真正的后端程序。
+
+
+
+其中， `resty` 是我们后面会频繁使用到的命令行工具，课程中的演示代码都是用它来运行的，而不是启动后台的 OpenResty 服务。
+
+
+
+更为重要的是，OpenResty 的背后隐藏了非常多的文化和技术细节，它就像漂浮在海面上的一座冰山。我希望能够通过这门课程，给你展示更全面、更立体的 OpenResty，而不仅仅是它对外暴露出来的 API。
+
+
+
+### 思考
+
+最后，我给你留一个作业题。我们现在的做法，是把 Lua 代码写在 NGINX 配置文件中。不过，如果代码越来越多，那代码的可读性和可维护性就无法保证了。
+
+你有什么方法来解决这个问题吗？
+
+> chatGPT
+
+当 Lua 代码在 NGINX 配置文件中变得越来越多时，确实会影响代码的可读性和可维护性。为了解决这个问题，可以考虑以下方法：
+
+1. 将 Lua 代码分离到独立的 Lua 脚本文件中：将 Lua 代码从 NGINX 配置文件中提取出来，放入独立的 Lua 脚本文件中。然后，通过 `content_by_lua_file` 或 `access_by_lua_file` 指令在 NGINX 配置文件中引用这些脚本文件。这样可以使代码更加清晰和易于维护。
+2. 使用 Lua 模块：将常用的功能封装为可重用的 Lua 模块。这样，可以将代码逻辑分解为多个模块，每个模块负责不同的功能。然后，在 NGINX 配置文件中使用 `require` 指令引入这些模块，以便在 Lua 代码中使用。这种方式可以提高代码的可读性和可维护性，并促进代码的重用。
+3. 使用 Lua 开发框架：考虑使用一些成熟的 Lua 开发框架，如 OpenResty。这些框架提供了更高级的抽象和功能，可以帮助组织和管理 Lua 代码。它们通常提供了路由、中间件、数据库访问等功能，使代码更加结构化和易于管理。
+4. 使用注释和文档：无论代码是写在 NGINX 配置文件中还是独立的 Lua 脚本文件中，都应该使用注释来解释代码的逻辑和功能。此外，编写文档来描述代码的用途、输入输出等信息也是很有帮助的。这样可以提高代码的可读性，并帮助其他开发人员理解和维护代码。
+
+综上所述，将 Lua 代码分离到独立的文件、使用模块化的设计、使用 Lua 开发框架以及添加注释和文档，都是提高代码可读性和可维护性的有效方法。选择适合你项目需求的方法，并根据实际情况进行调整和优化。
