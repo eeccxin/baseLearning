@@ -583,3 +583,220 @@ hello, world
 4. 使用注释和文档：无论代码是写在 NGINX 配置文件中还是独立的 Lua 脚本文件中，都应该使用注释来解释代码的逻辑和功能。此外，编写文档来描述代码的用途、输入输出等信息也是很有帮助的。这样可以提高代码的可读性，并帮助其他开发人员理解和维护代码。
 
 综上所述，将 Lua 代码分离到独立的文件、使用模块化的设计、使用 Lua 开发框架以及添加注释和文档，都是提高代码可读性和可维护性的有效方法。选择适合你项目需求的方法，并根据实际情况进行调整和优化。
+
+
+
+
+
+## 03 | 揪出隐藏在背后的那些子项目
+
+先来揭晓上一节最后留下的思考题，如何把 Lua 代码从 nginx.conf 里面抽取出来，保持代码的可读性和可维护性呢？
+
+操作其实很简单。
+
+我们先在 geektime 的工作目录下，创建一个名为 lua 的目录，专门用来存放代码：
+
+```bash
+$ mkdir lua
+$ cat lua/hello.lua
+ngx.say("hello,new world")
+```
+
+然后修改 nginx.conf 的配置，把 content_by_lua_block 改为 content_by_lua_file：
+
+```
+pid logs/nginx.pid;
+events {
+  worker_connections 1024;
+}
+
+http {
+  server {
+    listen 8080;
+    location / {
+      content_by_lua_file lua/hello.lua;
+      }
+    }
+  }
+
+```
+
+最后，重启 OpenResty 的服务就可以了：
+
+```
+$ sudo kill -HUP `cat logs/nginx.pid`
+```
+
+> - `kill`: 这是一个用于发送信号给进程的命令。在这个命令中，我们使用 `kill` 命令来发送信号给 Nginx 进程。
+> - `-HUP`: 这是一个指定要发送的信号的选项。在这个命令中，我们使用 `-HUP` 选项来发送 HUP（Hang Up）信号给 Nginx 进程（是一种用于通知进程重新加载配置或重新启动的信号）。
+> - `cat logs/nginx.pid`: 这是一个用于获取 Nginx 进程 ID（PID）的命令。在这个命令中，我们使用 `cat` 命令来读取 `logs/nginx.pid` 文件中的内容，该文件通常包含了 Nginx 进程的 PID。
+
+你可以使用 curl ，验证是否返回了预期的结果。至于后面 Lua 代码的变更，你就可以直接修改 hello.lua 这个文件，而不是 nginx.conf 了。
+
+```bash
+# curl -i 127.0.0.1:18080
+HTTP/1.1 200 OK
+Server: openresty/1.25.3.2
+Date: Mon, 09 Sep 2024 12:11:51 GMT
+Content-Type: text/plain
+Transfer-Encoding: chunked
+Connection: keep-alive
+
+hello,new world
+```
+
+
+
+其实，在上面这个小例子里面，也有几个有趣的地方：
+
+1. content_by_lua_file lua/hello.lua; 里面写的是相对路径，那么 OpenResty 是如何找到这个 Lua 文件的？（如何查找路径）
+2. Lua 代码内容的变更，需要重启 OpenResty 服务才会生效，这样显然不方便调试，那么有没有什么即时生效的方法呢？（如何热更）
+3. 如何把 lua 代码所在的文件夹，加入到 OpenResty 的查找路径中呢？
+
+这几个问题，我鼓励你先自己思考一下，它们都可以在官方文档里面找到[答案](https://github.com/openresty/lua-nginx-module#content_by_lua_file)。这也是为什么，我一直强调文档的重要性。
+
+
+
+接下来我们一起来解答。先看第一个问题。如果原本给出的是相对路径，那么 OpenResty 在启动时，会把 OpenResty 启动的命令行参数中的 -p PATH 作为前缀，将相对路径拼接为绝对路径。这样，自然就可以顺利找到 Lua 文件。
+
+
+
+再来看第二个问题。Lua 代码在第一个请求时会被加载，并默认缓存起来。所以在你每次修改 Lua 源文件后，都必须重新加载 OpenResty 才会生效。其实，在 nginx.conf 中关闭 lua_code_cache 就能避免重新加载，这一点你可以自己试试看。不过，特别需要注意的是，这种方法**只能临时**用于开发和调试，如果是线上部署，一定要记得打开缓存，否则会非常影响性能。
+
+
+
+最后一个问题，OpenResty 提供了 lua_package_path 指令，可以设置 Lua 模块的查找路径。针对上面的例子，我们可以把 lua_package_path 设置为 `$prefix/lua/?.lua;;`，其中，
+
+- `$prefix`就是启动参数中的 -p PATH；
+- `/lua/?.lua`表示 lua 目录下所有以 .lua 作为后缀的文件；
+- 最后的两个分号，则代表内置的代码搜索路径。（？？）
+
+### OpenResty 安装后的目录结构
+
+了解完第一个 hello world 程序后，我们继续追根究底，来看下 OpenResty 自身安装完成后，它的目录结构是怎样的，以及里面包含哪些文件。
+
+
+
+我们先通过 -V 选项，查看 OpenResty 安装到了哪一个目录。下面的这个结果，我省略了很多模块的编译参数，这些我们稍后再来补上：
+
+```
+$ openresty -V
+nginx version: openresty/1.13.6.2
+built by clang 10.0.0 (clang-1000.10.44.4)
+built with OpenSSL 1.1.0h  27 Mar 2018
+TLS SNI support enabled
+configure arguments: --prefix=/usr/local/Cellar/openresty/1.13.6.2/nginx ...
+
+```
+
+我本地是通过 brew 安装的，所以目录是`/usr/local/Cellar/openresty/1.13.6.2/nginx` ，和你的本地环境很可能不同。这其中主要包含了 bin、luajit、lualib、nginx、pod 这几个子目录。理解这几个文件夹的含义很重要，可以帮我们更好地学习 OpenResty。接下来，我们逐个来看一下。
+
+> 自己的安装目录是 /usr/local/openresty/nginx
+
+```bash
+# ll /usr/local/openresty
+total 296
+drwxr-xr-x.  2 root root   4096 Sep  5 20:32 bin
+-rw-r--r--.  1 root root  22924 Jul 19 14:58 COPYRIGHT
+drwxr-xr-x.  2 root root   4096 Mar 22  2023 lua
+drwxr-xr-x.  6 root root   4096 Jul 19 14:58 luajit
+drwxr-xr-x.  6 root root   4096 Sep  5 20:31 lualib
+drwxr-xr-x. 11 root root   4096 Jul 19 14:58 nginx
+drwxr-xr-x.  4 root root   4096 Sep  5 20:31 openssl111
+drwxr-xr-x.  3 root root   4096 Sep  5 20:31 pcre
+drwxr-xr-x. 47 root root   4096 Mar 22  2023 pod
+-rw-r--r--.  1 root root 235463 Mar 22  2023 resty.index
+drwxr-xr-x.  5 root root   4096 Mar 22  2023 site
+drwxr-xr-x.  3 root root   4096 Sep  5 20:31 zlib
+```
+
+
+
+首先是最重要的 **bin 目录**（自己无bin目录）：
+
+```
+$ ll /usr/local/Cellar/openresty/1.13.6.2/bin
+total 320
+-r-xr-xr-x  1 ming  admin    19K  3 27 12:54 md2pod.pl
+-r-xr-xr-x  1 ming  admin    15K  3 27 12:54 nginx-xml2pod
+lrwxr-xr-x  1 ming  admin    19B  3 27 12:54 openresty -> ../nginx/sbin/nginx
+-r-xr-xr-x  1 ming  admin    62K  3 27 12:54 opm
+-r-xr-xr-x  1 ming  admin    29K  3 27 12:54 resty
+-r-xr-xr-x  1 ming  admin    15K  3 27 12:54 restydoc
+-r-xr-xr-x  1 ming  admin   8.3K  3 27 12:54 restydoc-index
+
+```
+
+这里面既有我们上一节中提到的 OpenResty CLI--- resty，也有最核心的可执行文件 openresty，它其实是 nginx 的一个软链接。
+
+至于目录里面其他的一些工具，没有任何悬念，它们和 resty 一样，都是 Perl 脚本。
+
+
+
+这段代码中的两个例子，分别查询了 OpenResty 的 API 和 NGINX 的指令。restydoc 这个工具，对服务端工程师的专注开发有很大帮助。
+
+
+
+浏览完了 bin 目录，我们接着看下 **pod 目录**。先强调一点，这里的“pod”，和 k8s 里“pod”的概念完全没有关系。pod 是 Perl 里面的一种标记语言，用于给 Perl 的模块编写文档。pod 目录中存放的就是 OpenResty、 NGINX、lua-resty-*、LuaJIT 的文档， 这些就和刚才提到的 restydoc 联系在一起了。
+
+```
+# ll /usr/local/openresty/pod
+total 180
+drwxr-xr-x. 2 root root 4096 Mar 22  2023 array-var-nginx-module-0.05
+drwxr-xr-x. 2 root root 4096 Mar 22  2023 drizzle-nginx-module-0.1.11
+drwxr-xr-x. 2 root root 4096 Mar 22  2023 echo-nginx-module-0.62
+......
+```
+
+
+
+接下来是熟悉的 nginx 和 luajit 这两个目录。这两个很好理解，主要存放  NGINX 和 LuaJIT 的可执行文件和依赖，是 OpenResty 的基石。很多人说 OpenResty 基于 Lua，这个说法其实并不准确，从上面我们可以看出， OpenResty 其实是基于 LuaJIT 的。
+
+事实上，早期的 OpenResty 同时带有 Lua 和 LuaJIT，你可以通过编译选项，来决定使用 Lua 还是 LuaJIT。不过到了现在，Lua 逐渐被淘汰，就只支持更高性能的 LuaJIT 了。
+
+```bash
+# ll /usr/local/openresty/nginx/
+total 36
+drwx------. 2 nobody root 4096 Mar 22  2023 client_body_temp
+drwxr-xr-x. 2 root   root 4096 Sep  5 20:31 conf
+drwx------. 2 nobody root 4096 Mar 22  2023 fastcgi_temp
+drwxr-xr-x. 2 root   root 4096 Sep  5 20:31 html
+drwxr-xr-x. 2 root   root 4096 Jul 19 14:58 logs
+drwx------. 2 nobody root 4096 Mar 22  2023 proxy_temp
+drwxr-xr-x. 2 root   root 4096 Sep  5 20:31 sbin
+drwx------. 2 nobody root 4096 Mar 22  2023 scgi_temp
+drwx------. 2 nobody root 4096 Mar 22  2023 uwsgi_temp
+
+# ll /usr/local/openresty/luajit/
+total 16
+drwxr-xr-x. 2 root root 4096 Sep  5 20:31 bin
+drwxr-xr-x. 3 root root 4096 Jul 19 14:58 include
+drwxr-xr-x. 4 root root 4096 Sep  5 20:31 lib
+drwxr-xr-x. 6 root root 4096 Sep  5 20:31 share
+
+# ll /usr/local/openresty/lualib/
+total 64
+-rwxr-xr-x. 1 root root 33352 Jul 19 14:58 cjson.so
+-rwxr-xr-x. 1 root root  6112 Jul 19 14:58 librestysignal.so
+drwxr-xr-x. 3 root root  4096 Sep  5 20:31 ngx
+drwxr-xr-x. 2 root root  4096 Mar 22  2023 rds
+drwxr-xr-x. 2 root root  4096 Sep  5 20:31 redis
+drwxr-xr-x. 8 root root  4096 Sep  5 20:31 resty
+-rw-r--r--. 1 root root  1409 Jul 19 14:58 tablepool.lua
+```
+
+事实上，早期的 OpenResty 同时带有 Lua 和 LuaJIT，你可以通过编译选项，来决定使用 Lua 还是 LuaJIT。不过到了现在，Lua 逐渐被淘汰，就只支持更高性能的 LuaJIT 了。
+
+最后，我们看下 lualib 目录。它里面存放的是 OpenResty 中使用到的 Lua 库，主要分为 ngx 和 resty 两个子目录。
+
+- 前者存放的是 [lua-resty-core](https://github.com/openresty/lua-resty-core/tree/master/lib/ngx) 这个官方项目中的 Lua 代码，里面都是基于 FFI 重新实现的 OpenResty API，后面我会用专门的文章来解释为什么要重新实现，这里你有个大概印象即可，不必深究。
+- 而 resty 目录中存放的则是各种 lua-resty-* 项目包含的 Lua 代码，接下来我们会接触到。
+
+按照我讲课的惯例，到这一步我会给出这些目录源头的出处。这也是开源项目的乐趣之一，如果你喜欢打破砂锅问到底，那你总发现更多好玩的东西。
+
+下面是 OpenResty 在 CentOS 中的[打包脚本](https://github.com/openresty/openresty-packaging/blob/master/rpm/SPECS/openresty.spec#L218)，里面包含了上面提到的所有目录，你可以自己了解一下。
+
+```
+
+```
+
