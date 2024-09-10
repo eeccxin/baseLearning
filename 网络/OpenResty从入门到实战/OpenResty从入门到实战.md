@@ -16,6 +16,26 @@
 
 官网： https://openresty.org/cn/installation.html
 
+OpenResty 在 GitHub 的  [项目主页](https://github.com/openresty/)
+
+## 一些基础介绍
+
+### perl 语言
+
+Perl（Practical Extraction and Reporting Language）是一种通用的脚本编程语言，由Larry Wall于1987年创建。Perl的设计目标是通过简洁的语法和强大的文本处理能力来提供一种实用的工具，用于文本处理、系统管理、网络编程、图形界面开发等各种任务。
+
+Perl具有许多特性，使其成为一种灵活且功能强大的编程语言：
+
+1. 文本处理能力：Perl在处理文本和字符串方面非常强大，提供了丰富的正则表达式支持和内置的文本处理函数，使得处理和转换文本数据变得非常方便。
+2. 多用途：Perl可以用于各种任务，包括系统管理、日志分析、网络编程、Web开发、数据库操作等。它具有广泛的模块库，可以轻松地扩展其功能。
+3. 跨平台：Perl可以在多个操作系统上运行，包括Unix/Linux、Windows、Mac等。
+4. 高级特性：Perl支持面向对象编程（OOP），具有异常处理、模块化、动态类型等高级特性。
+5. CPAN：CPAN（Comprehensive Perl Archive Network）是Perl社区的官方模块库，提供了大量的可重用模块，可以帮助开发人员快速构建复杂的应用程序。
+
+
+
+
+
 
 
 
@@ -796,7 +816,353 @@ drwxr-xr-x. 8 root root  4096 Sep  5 20:31 resty
 
 下面是 OpenResty 在 CentOS 中的[打包脚本](https://github.com/openresty/openresty-packaging/blob/master/rpm/SPECS/openresty.spec#L218)，里面包含了上面提到的所有目录，你可以自己了解一下。
 
+```bash
+%files
+%defattr(-,root,root,-)
+
+/etc/init.d/%{name}
+/usr/bin/%{name}
+%{orprefix}/bin/openresty
+%{orprefix}/site/lualib/
+%{orprefix}/luajit/*
+%{orprefix}/lualib/*
+%{orprefix}/nginx/html/*
+%{orprefix}/nginx/logs/
+%{orprefix}/nginx/sbin/*
+%{orprefix}/nginx/tapset/*
+%config(noreplace) %{orprefix}/nginx/conf/*
+%{orprefix}/COPYRIGHT
 ```
 
+
+
+### OpenResty 项目概览
+
+提到 OpenResty，你应该会想到 **lua-nginx-module**。没错，**这个 NGINX 的 C 模块确实是 OpenResty 的核心，但它并不等价于 OpenResty**。很多工程师都会把 OpenResty 叫做 ngx lua，有不少技术大会的分享和出版的书籍中也是用的这个叫法，这其实是不严谨的，也是 OpenResty 社区不提倡的。
+
+
+
+下面我来讲讲为什么，以及 OpenResty 中除了 lua-nginx-module ，还有哪些其他的关联项目。
+
+打开 OpenResty 在 GitHub 的  [项目主页](https://github.com/openresty/)，你可以看到 OpenResty 包含了 68 个公开的项目，大概分为以下 7 类, 下面我来分别简单介绍下，让你有个初步的印象，这样你后面学习起来也轻松一些。
+
+#### **NGINX C 模块**
+
+OpenResty 的项目命名都是有规范的，以 `*-nginx-module`命名的就是 NGINX 的 C 模块(core?)。
+
+OpenResty 中一共包含了 20 多个 C 模块，我们在本节最开始使用的 openresty -V 中，也可以看到这些 C 模块：
+
+```bash
+$ openresty -V
+nginx version: openresty/1.13.6.2
+built by clang 10.0.0 (clang-1000.10.44.4)
+built with OpenSSL 1.1.0h  27 Mar 2018
+TLS SNI support enabled
+configure arguments: --prefix=/usr/local/Cellar/openresty/1.13.6.2/nginx --with-cc-opt='-O2 -I/usr/local/include -I/usr/local/opt/pcre/include -I/usr/local/opt/openresty-openssl/include' --add-module=../ngx_devel_kit-0.3.0 --add-module=../echo-nginx-module-0.61 --add-module=../xss-nginx-module-0.06 --add-module=../ngx_coolkit-0.2rc3 --add-module=../set-misc-nginx-module-0.32 --add-module=../form-input-nginx-module-0.12 --add-module=../encrypted-session-nginx-module-0.08 --add-module=../srcache-nginx-module-0.31 --add-module=../ngx_lua-0.10.13 --add-module=../ngx_lua_upstream-0.07 --add-module=../headers-more-nginx-module-0.33 --add-module=../array-var-nginx-module-0.05 --add-module=../memc-nginx-module-0.19 --add-module=../redis2-nginx-module-0.15 --add-module=../redis-nginx-module-0.3.7 --add-module=../ngx_stream_lua-0.0.5 --with-ld-opt='-Wl,-rpath,/usr/local/Cellar/openresty/1.13.6.2/luajit/lib -L/usr/local/lib -L/usr/local/opt/pcre/lib -L/usr/local/opt/openresty-openssl/lib' --pid-path=/usr/local/var/run/openresty.pid --lock-path=/usr/local/var/run/openresty.lock --conf-path=/usr/local/etc/openresty/nginx.conf --http-log-path=/usr/local/var/log/nginx/access.log --error-log-path=/usr/local/var/log/nginx/error.log --with-pcre-jit --with-ipv6 --with-stream --with-stream_ssl_module --with-stream_ssl_preread_module --with-http_v2_module --without-mail_pop3_module --without-mail_imap_module --without-mail_smtp_module --with-http_stub_status_module --with-http_realip_module --with-http_addition_module --with-http_auth_request_module --with-http_secure_link_module --with-http_random_index_module --with-http_geoip_module --with-http_gzip_static_module --with-http_sub_module --with-http_dav_module --with-http_flv_module --with-http_mp4_module --with-http_gunzip_module --with-threads --with-dtrace-probes --with-stream --with-stream_ssl_module --with-http_ssl_module
+
 ```
+
+
+
+这里`--add-module=`后面跟着的，就是 OpenResty 的 C 模块。其中，最核心的就是 lua-nginx-module 和 stream-lua-nginx-module，前者用来处理七层流量，后者用来处理四层流量。
+
+
+
+**这些 C 模块中，有些是需要特别注意的，虽然默认编译进入了 OpenResty，但并不推荐使用**。 比如 redis2-nginx-module、redis-nginx-module 和 memc-nginx-module，它们是用来和 redis 以及 memcached 交互使用的。这些 C 库是 OpenResty 早期推荐使用的，但在 cosocket 功能加入之后，它们都已经被 lua-resty-redis 和 lua-resty-memcached 替代，处于疏于维护的状态。
+
+
+
+OpenResty 后面也不会开发更多的 NGINX C 库，而是专注在基于 cosocket 的 Lua 库上，后者才是未来。
+
+
+
+#### lua-resty- 周边库
+
+OpenResty 官方仓库中包含 18 个 lua-resty-* 库，涵盖 Redis、MySQL、memcached、websocket、dns、流量控制、字符串处理、进程内缓存等常用库。除了官方自带的之外，还有更多的第三方库。它们非常重要，所以下一章节，我们会花更多的篇幅来专门介绍这些周边库。
+
+
+
+#### 自己维护的 LuaJIT 分支
+
+OpenResty 除了维护自己的 OpenSSL patch 外，还维护了自己的 [LuaJIT 分支](https://github.com/openresty/luajit2)。在 2015 年，LuaJIT 的作者 Mike Pall 宣布退休，寻找新的 LuaJIT 维护者，但 Mike 并没有找到合适的维护者，他现在主要是做 bugfix 的维护工作，新功能的开发也已经暂停，所以 OpenResty 维护着自己的 LuaJIT 分支。
+
+
+
+**相对于 Lua，LuaJIT 增加了不少独有的函数，这些函数非常重要**，但知道的工程师并不多，算是 _ 半隐藏技能 _，后面我也会专门介绍。
+
+> LuaJIT（Lua Just-In-Time Compiler）是一个针对 Lua 编程语言的即时编译器。它是对标准 Lua 解释器的增强版本，通过即时编译技术提供了更高的执行性能。
+>
+> LuaJIT 的主要目标是提供快速的执行速度和低延迟。它通过将 Lua 代码转换为机器码来实现即时编译，从而避免了传统解释器的解释执行过程。这种即时编译的方式使得 LuaJIT 在执行 Lua 代码时能够获得更高的性能。
+>
+> 除了即时编译，LuaJIT 还提供了其他优化技术，如运行时类型推断和优化、垃圾回收优化等。这些优化技术进一步提升了 LuaJIT 的性能和效率。
+
+
+
+#### 测试框架
+
+OpenResty 的测试框架是[test-nginx](https://github.com/openresty/test-nginx)，同样也是用 **Perl 语言**来开发的，从名字上就能看出来，它是专门用来测试 NGINX 相关的项目。
+
+OpenResty 官方的所有 C 模块和 lua-resty 库的测试案例，都是由 test-nginx 驱动的。
+
+
+
+这个框架和常见的基于断言的框架不同，是一套更强大和独立的系统，我们后面会花几节课来专门学习。
+
+事实上，有些 OpenResty 的代码贡献者也没有搞清楚这个测试框架，有时候提交的 PR 中包含了不少复杂的 C 和 Lua 代码，但对编写对应的测试案例一事，还是经常发怵。所以，如果你已经查看过一些 OpenResty 项目中`/t`目录里面的测试案例，却仍然一头雾水，先别急着怀疑自己，大部分人都是一样的。
+
+
+
+除了 test-nginx 之外，[mockeagain](https://github.com/openresty/mockeagain) 这个项目可以模拟慢速的网络，让程序每次只读写一个字节。对于 web 服务器来说，这是一个很有用的工具。
+
+
+
+#### 调试工具链
+
+OpenResty 项目在如何科学和动态地调试代码上，花费了大量的精力，可以说是达到了极致。OpenResty 的作者章亦春专门写了[一篇文章](https://openresty.org/posts/dynamic-tracing/)，来介绍动态追踪技术。我强烈推荐给你，看完也有助于理解对应的工具链。
+
+
+
+[openresty-systemtap-toolkit](https://github.com/openresty/openresty-systemtap-toolkit) 和 [stapxx](https://github.com/openresty/stapxx) 这两个 OpenResty 的项目，都基于 systemtap 这个动态调试和追踪工具。使用 systemtap 最大的优势，便是实现活体分析，同时对目标程序完全无侵入。
+
+
+
+打个比方，systemtap，就像是我们去医院照了个 CT，无痛无感知。更棒的是，systemtap 可以生成直观的火焰图来做性能分析，后面我也会专门介绍，这里先放一个火焰图，让你直观上有个感性的认识：
+
+![img](OpenResty从入门到实战.assets/dcc1340a7622ba1643e8d8b9347a417f.png)
+
+
+
+#### 打包相关
+
+OpenResty 在不同发行操作系统（比如 CentOS、Ubuntu、MacOS 等）版本中的打包脚本，出于更细可控力度的目的，都是手工编写的。我们在介绍安装后目录结构的时候，就已经涉及到了这些打包相关的项目：[openresty-packaging](https://github.com/openresty/openresty-packaging)  和 [home-brew](https://github.com/openresty/homebrew-brew)。如果你对此有兴趣，可以自行学习，这里我就不再赘述了。
+
+
+
+#### 工程化工具
+
+除了上面这些比较大块儿的项目之外，OpenResty 还有一些负责工程化的工具，大都也是“深藏闺中”。
+
+
+
+比如 [openresty-devel-utils](https://github.com/openresty/openresty-devel-utils) 就是开发 OpenResty 和 NGINX 的工具集。
+
+它们也都使用 Perl 开发，其中大部分的工具都是没有文档的。但对于 OpenResty 的开发者来说，这些工具又是非常有用的。
+
+
+
+这里我先挑几个简单介绍一下。
+
+[lj-releng](https://github.com/openresty/openresty-devel-utils/blob/master/lj-releng) 是一个简单有效的 LuaJIT 代码检测工具，类似 luacheck，可以找出全局变量等潜在的问题。
+
+[reindex](https://github.com/openresty/openresty-devel-utils/blob/master/reindex) 从名字来看是重建索引的意思，它其实是格式化 test-nginx 测试案例的工具，可以重新排列测试案例的编号，以及去除多余的空白符。reindex 可以说是 OpenResty 开发者每天都会用到的工具之一。
+
+[opsboy](https://github.com/openresty/opsboy) 也是一个深藏不露的项目，主要用于自动化部署。OpenResty 每次发布版本前，都会在 AWS EC2 集群上做完整的回归测试，详细的文档你可以参考[官方文档](https://openresty.org/en/ec2-test-cluster.html)，而这个回归测试正是由 opsboy 来部署和驱动的。
+
+opsboy 是一个用 Perl 实现的 DSL（领域特定语言）。实际上， OpenResty 的作者非常喜欢创造各种不同的 DSL 来解决问题。
+
+
+
+### 写在最后
+
+今天，我们主要学习了 OpenResty 安装后的目录结构，以及背后的一些子项目。希望你学完今天的内容后，能够了解更多 OpenResty 的项目。OpenResty 已经远远超出了 NGINX 负载均衡和反向代理的范畴，实现了自己的生态，下一次我们会详细聊聊这方面。
+
+
+
+## 04 | 如何管理第三方包？从包管理工具luarocks和opm说起
+
+在上一节中，我们大概了解了下 OpenResty 官方的一些项目。不过，如果我们把 OpenResty 用于生产环境，显然，OpenResty 安装包自带的这些库是远远不够的，比如没有 lua-resty 库来发起 HTTP 请求，也没有办法和 Kafka 交互。
+
+
+
+那么应该怎么办呢？本节我们就来一起了解下，应该从什么渠道来找到这些第三方库。
+
+这里，我再次强调下，OpenResty 并不是 NGINX 的 fork，也不是在 NGINX 的基础上加了一些常用库重新打包，而**只是把 NGINX 当作底层的网络库来使用**。
+
+当你使用 NGINX 的时候，是不会想着如何发起自定义的 HTTP 请求，以及如何与 Kafka 交互的。而在 OpenResty 的世界中，由于 cosocket 的存在，开发者可以轻松地写出 lua-resty-http 和 lua-resty-kafka ，来处理这类需求，就像你用 Python、PHP 这类的开发语言一样。
+
+
+
+另外，还有一个建议告诉你：你不应该使用任何 Lua 世界的库来解决上述问题，而是应该使用 cosocket 的 lua-resty-* 库。**Lua 世界的库很可能会带来阻塞**，让原本高性能的服务，直接下降几个数量级。这是 OpenResty 初学者的常见错误，而且并不容易觉察到。
+
+那我们怎么找到这些非阻塞的 lua-resty-* 库呢？接下来，我来为你介绍下面几种途径。
+
+### **OPM**
+
+[OPM](https://opm.openresty.org/)（OpenResty Package Manager）是 OpenResty 自带的包管理器，在你安装好 OpenResty 之后，就可以直接使用。我们可以试着去找找发送 http 请求的库 ``
+
+
+
+第一次查询可能会比较慢，需要几秒钟的时间。opm.openresty.org 会从 PostgreSQL 数据库中做一次查询，并把结果缓存一段时间。search 具体的返回结果比较长，我们这里只看下第一条返回值：
+
+```
+$ opm search http
+openresty/lua-resty-upload          Streaming reader and parser for HTTP file uploading based on ngx_lua cosocket
+```
+
+呃，看到这个结果，你可能会疑惑：这个 lua-resty-upload 包和发送 http 有什么关系呢？
+
+
+
+原来，OPM 做搜索的时候，是用后面的关键字同时搜索了包的名字和包的简介。这也是为什么上面的搜索会持续几秒，因为它在 PostgreSQL 里面做了字符串的全文搜索。
+
+不过，不管怎么说，这个返回并不友好。让我们修改下关键字，重新搜索下：
+
+```
+$ opm search lua-resty-http
+ledgetech/lua-resty-http                          Lua HTTP client cosocket driver for OpenResty/ngx_lua
+pintsized/lua-resty-http                          Lua HTTP client cosocket driver for OpenResty/ngx_lua
+agentzh/lua-resty-http                            Lua HTTP client cosocket driver for OpenResty/ngx_lua
+```
+
+
+
+其实，在 OpenResty 世界中，如果你使用 cosocket 实现了一个包，那么就要使用 lua-resty- 这个前缀，算是一个不成文的规定。
+
+回过头来看刚刚的搜索结果，OPM 使用了贡献者的 GitHub 仓库地址作为包名，即 GitHub ID / repo name。上面返回了三个 lua-resty-http 第三方库，我们应该选择哪一个呢？
+
+眼尖的你，可能已经发现了 agentzh 这个 ID，没错，这就是 OpenResty 作者春哥本人。在选择这个包之前，我们看下它的 star 数和最后更新时间：只有十几个 star，最后一次更新是在 2016 年。很明显，这是个被放弃的坑。更深入地看下，pintsized/lua-resty-http 和 ledgetech/lua-resty-http 其实指向了同一个仓库。所以，不管你选哪个都是一样的。
+
+同时 [OPM 的网站](https://opm.openresty.org/) 也相对简单，没有提供包的下载次数，也没有这个包的依赖关系。你需要花费更多的时间，来甄别出到底使用哪些 lua-resty 库才是正确的选择，而这些本应该是维护者的事情。
+
+
+
+### **LUAROCKS**
+
+[LuaRocks](https://luarocks.org/) 是 OpenResty 世界的另一个包管理器，诞生在 OPM 之前。不同于 OPM 里只包含 OpenResty 相关的包，LuaRocks 里面还包含 Lua 世界的库。举个例子，LuaRocks 里面的 LuaSQL-MySQL，就是 Lua 世界中连接 MySQL 的包，并不能用在 OpenResty 中。
+
+
+
+还是以 HTTP 库为例，我们尝试用 LuaRocks 来试一试查找：
+
+```
+$ luarocks search http
+```
+
+
+
+你可以看到，也是返回了一大堆包。
+
+我们不妨再换个关键字：
+
+```
+$ luarocks search lua-resty-http
+```
+
+这次只返回了一个包。我们可以到 LuaRocks 的网站上，去看看[这个包的详细信息](https://luarocks.org/modules/pintsized/lua-resty-http)，下面是网站页面的截图：
+
+<img src="OpenResty从入门到实战.assets/ba5cbaae9a7a9ab1fbd05099dc7e9695.jpg" alt="img" style="zoom:50%;" />
+
+
+
+这里面包含了作者、License、GitHub 地址、下载次数、功能简介、历史版本、依赖等。和 OPM 不同的是，LuaRocks 并没有直接使用 GitHub 的用户信息，而是需要开发者单独在 LuaRocks 上进行注册。
+
+
+
+其实，开源的 API 网关项目 Kong，就是使用 LuaRocks 来进行包的管理，并且还把 LuaRocks 的作者收归麾下。我们接着就来简单看下，Kong 的包管理配置是怎么写的。
+
+
+
+目前 Kong 的最新版本是 1.1.1， 你可以在 https://github.com/Kong/kong 的项目下找到最新的 .rockspec 后缀的文件。
+
+```
+package = "kong"
+version = "1.1.1-0"
+supported_platforms = {"linux", "macosx"}
+source = {
+  url = "git://github.com/Kong/kong",
+  tag = "1.1.1"
+}
+description = {
+  summary = "Kong is a scalable and customizable API Management Layer built on top of Nginx.",
+  homepage = "https://konghq.com",
+  license = "Apache 2.0"
+}
+dependencies = {
+  "inspect == 3.1.1",
+  "luasec == 0.7",
+  "luasocket == 3.0-rc1",
+  "penlight == 1.5.4",
+  "lua-resty-http == 0.13",
+  "lua-resty-jit-uuid == 0.0.7",
+  "multipart == 0.5.5",
+  "version == 1.0.1",
+  "kong-lapis == 1.6.0.1",
+  "lua-cassandra == 1.3.4",
+  "pgmoon == 1.9.0",
+  "luatz == 0.3",
+  "http == 0.3",
+  "lua_system_constants == 0.1.3",
+  "lyaml == 6.2.3",
+  "lua-resty-iputils == 0.3.0",
+  "luaossl == 20181207",
+  "luasyslog == 1.0.0",
+  "lua_pack == 1.0.5",
+  "lua-resty-dns-client == 3.0.2",
+  "lua-resty-worker-events == 0.3.3",
+  "lua-resty-mediador == 0.1.2",
+  "lua-resty-healthcheck == 0.6.0",
+  "lua-resty-cookie == 0.1.0",
+  "lua-resty-mlcache == 2.3.0",
+......
+```
+
+通过文件你可以看到，依赖项里面掺杂了 lua-resty 库和纯 Lua 世界的库，使用 OPM 只能部分安装这些依赖项。写好配置后，使用 luarocks 的 upload 命令把这个配置上传，用户就可以用 LuaRocks 来下载并安装 Kong 了。
+
+
+
+另外，在 OpenResty 中，除了 Lua 代码外，我们还经常会调用 C 代码，这时候就需要编译才能使用。LuaRocks 是支持这么做的，你可以在 rockspec 文件中，指定 C 源码的路径和名称，这样 LuaRocks 就会帮你本地编译。而 OPM 暂时还不支持这种特性。
+
+
+
+不过，需要注意的是，OPM 和 LuaRocks 都不支持私有包。
+
+
+
+### **AWESOME-RESTY**
+
+讲了这么多包管理的内容，其实呢，即使有了 OPM 和 LuaRocks，对于 OpenResty 的 lua-resty 包，我们还是管中窥豹的状态。到底有没有地方可以让我们一览全貌呢？
+
+
+
+当然是有的，[awesome-resty](https://github.com/bungle/awesome-resty) 这个项目，就维护了几乎所有 OpenResty 可用的包，并且都分门别类地整理好了。当你不确定是否存在适合的第三方包时，来这里“按图索骥”，可以说是最好的办法。
+
+
+
+还是以 HTTP 库为例， 在 awesome-resty 中，它自然是属于 [networking](https://github.com/bungle/awesome-resty#networking) 分类：
+
+```
+lua-resty-http by @pintsized — Lua HTTP client cosocket driver for OpenResty / ngx_lua
+lua-resty-http by @liseen — Lua http client driver for the ngx_lua based on the cosocket API
+lua-resty-http by @DorianGray — Lua HTTP client driver for ngx_lua based on the cosocket API
+lua-resty-http-simple — Simple Lua HTTP client driver for ngx_lua
+lua-resty-httpipe — Lua HTTP client cosocket driver for OpenResty / ngx_lua
+lua-resty-httpclient — Nonblocking Lua HTTP Client library for aLiLua & ngx_lua
+lua-httpcli-resty — Lua HTTP client module for OpenResty
+lua-resty-requests — Yet Another HTTP Library for OpenResty
+
+```
+
+
+
+我们看到，这里有 8 个 lua-resty-http 的第三方库。对比一下前面的结果，我们使用 OPM 只找到 2 个，而 LuaRocks 里面更是只有 1 个。不过，如果你是选择困难症，请直接使用第一个，它和 LuaRocks 中的是同一个。
+
+
+
+而对于愿意尝试的工程师，我更推荐你用最后一个库： [lua-resty-requests](https://github.com/tokers/lua-resty-requests)，它是人类更友好的 HTTP 访问库，接口风格与 Python 中大名鼎鼎的 [Requests](http://docs.python-requests.org/en/master/) 一致。如果你跟我一样是一个 Python 爱好者，一定会喜欢上 lua-resty-requests。这个库的作者是 OpenResty 社区中活跃的 tokers，因此你可以放心使用。
+
+
+
+必须要承认，OpenResty 现有的第三方库并不完善，所以，如果你在 awesome-resty 中没有找到你需要的库，那就需要你自己来实现，比如 OpenResty 一直没有访问 Oracle  或者 SQLServer 的 lua-rsety 库。
+
+
+
+### 写在最后
+
+一个开源项目想要健康地发展壮大，不仅需要有硬核的技术、完善的文档和完整的测试，还需要带动更多的开发者和公司一起加入进来，形成一个生态。正如 Apache 基金会的名言：社区胜于代码。
+
+
+
+还是那句话，想把 OpenResty 代码写好，一点儿也不简单。OpenResty 还没有系统的学习资料，也没有官方的代码指南，很多的优化点的确已经写在了开源项目中，但大多数开发者却是知其然而不知其所以然。这也是我这个专栏的目的所在，希望你学习完之后，可以写出更高效的 OpenResty 代码，也可以更容易地参与到 OpenResty 相关的开源项目中来。
+
+
 
