@@ -500,6 +500,7 @@ http {
 
         #静态文件，nginx自己处理
         location ~ ^/(images|javascript|js|css|flash|media|static)/ {
+            # 指定静态文件的根目录
             root D:\01_Workspace\Project\github\zp\SpringNotes\spring-security\spring-shiro\src\main\webapp\views;
             #过期30天，静态文件不怎么更新，过期可以设大一点，如果频繁更新，则可以设置得小一点。
             expires 30d;
@@ -509,7 +510,7 @@ http {
         location /NginxStatus {
             stub_status           on;
             access_log            on;
-            auth_basic            "NginxStatus";
+            auth_basic            "NginxStatus"; # 浏览器弹出的认证对话框标题（可自定义）
             auth_basic_user_file  conf/htpasswd;
         }
 
@@ -527,6 +528,16 @@ http {
     }
 }
 ```
+
+补充说明：
+
+```
+location ~ 表示使用则表达式匹配URI
+
+location xxx 没有符号表示前缀匹配
+```
+
+<img src="Nginx极简教程.assets/image-20250715181458927.png" alt="image-20250715181458927" style="zoom:50%;" />
 
 
 
@@ -858,23 +869,109 @@ server {
     listen       9050 default_server;
     listen       [::]:9050 default_server;
     server_name  _;
-    root         /share/fs;
+    root         /data/fs;
 }
 ```
+
+之后直接访问 ip:9050就能查看目录文件
+
+<img src="Nginx极简教程.assets/image-20250715194823675.png" alt="image-20250715194823675" style="zoom:50%;" />
+
+那怎么上传文件？
+
+1、使用**WebDAV 模块**
+
+```
+0、编译时支持webdav模块
+# 下载源码
+wget https://nginx.org/download/nginx-1.25.3.tar.gz
+tar -zxvf nginx-1.25.3.tar.gz
+cd nginx-1.25.3
+
+# 编译时加入 WebDAV 模块
+./configure --with-http_dav_module
+make
+sudo make install
+
+
+1、查看nginx是否已支持 webdav模块
+nginx -V 2>&1 | grep -o with-http_dav_module
+
+
+```
+
+**2. 配置 WebDAV 上传**
+
+```nginx
+user www-data; //需要指定用户，后续给对应文件给予这个用户权限
+
+server {
+    listen 9060;
+    server_name _;
+
+    # 上传目录
+    root /data/fs/uploads;
+    client_max_body_size 100M;  # 允许上传最大文件大小
+
+    # 启用 WebDAV 方法
+    dav_methods PUT DELETE MKCOL COPY MOVE;
+    dav_ext_methods PROPFIND OPTIONS;
+    create_full_put_path on;    # 自动创建目录
+    dav_access user:rw group:rw all:r;
+
+    # 禁止访问隐藏文件
+    location ~ /\. {
+        deny all;
+    }
+}
+```
+
+**3. 设置目录权限**
+
+```
+# 创建用户 -r	创建系统用户（UID < 1000）  -M	不创建家目录 -s /usr/sbin/nologin	禁止登录
+sudo useradd -r -M -s /usr/sbin/nologin www-data
+# 验证创建结果
+id www-data
+
+
+sudo mkdir -p /data/fs/uploads
+sudo chown -R www-data:www-data /data/fs/uploads
+sudo chmod -R 775 /data/fs/uploads
+
+
+```
+
+**4. 测试上传**
+
+```
+# 使用 curl 上传
+curl -T ./file.txt http://127.0.0.1:9060/
+
+# 使用浏览器或 WebDAV 客户端（如 WinSCP）
+```
+
+
 
 ### [解决跨域](https://dunwu.github.io/nginx-tutorial/#/nginx-quickstart?id=解决跨域)
 
 web 领域开发中，经常采用前后端分离模式。这种模式下，前端和后端分别是独立的 web 应用程序，例如：后端是 Java 程序，前端是 React 或 Vue 应用。
 
-各自独立的 web app 在互相访问时，势必存在跨域问题。解决跨域问题一般有两种思路：
+各自独立的 web app 在互相访问时，势必存在跨域问题。
+
+解决跨域问题一般有两种思路：
 
 1. **CORS**
+
+**CORS（Cross-Origin Resource Sharing，跨源资源共享）** 是一种浏览器安全机制，用于控制不同源（域名、协议、端口）之间的资源访问。
 
 在后端服务器设置 HTTP 响应头，把你需要允许访问的域名加入 `Access-Control-Allow-Origin` 中。
 
 1. **jsonp**
 
 把后端根据请求，构造 json 数据，并返回，前端用 jsonp 跨域。
+
+
 
 这两种思路，本文不展开讨论。
 
