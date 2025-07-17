@@ -42,13 +42,15 @@ Perl具有许多特性，使其成为一种灵活且功能强大的编程语言�
 
 # 开篇词 | OpenResty，为你打开高性能开发的大门
 
-​		你好，我是温铭，OpenResty 软件基金会主席，曾任某开源商业公司合伙人，前 360 开源技术委员会委员，在互联网安全公司工作了 10 年，负责开发过云查杀、反钓鱼和企业安全产品。接下来的几个月，我会带着你系统地学习一下 OpenResty。
+​		你好，我是温铭，OpenResty 软件基金会主席，曾任某开源商业公司合伙人，前 360 开源技术委员会委员，在互联网安全公司工作了 10 年，**负责开发过云查杀、反钓鱼和企业安全产品**。接下来的几个月，我会带着你系统地学习一下 OpenResty。
 
 
 
 ## 为什么学习 OpenResty
 
-为什么学习 OpenResty，这是开篇的第一个问题。我们正身处技术日新月异的时代，经常听到周围的工程师开玩笑说，学不动了。人的精力有限，选择学习某个技术都会有机会成本。最好的选择，是从你工作中涉及到的部分出发，学以致用。
+为什么学习 OpenResty，这是开篇的第一个问题。我们正身处技术日新月异的时代，经常听到周围的工程师开玩笑说，学不动了。
+
+人的精力有限，选择学习某个技术都会有机会成本。最好的选择，是从你工作中涉及到的部分出发，学以致用。
 
 
 
@@ -60,7 +62,7 @@ OpenResty 是一个兼具开发效率和性能的服务端开发平台，**虽�
 
 
 
-**它的核心是基于 NGINX 的一个 C 模块（lua-nginx-module）**，该模块将 LuaJIT 嵌入到 NGINX 服务器中，并对外提供一套完整的 Lua API，透明地支持非阻塞 I/O，提供了轻量级线程、定时器等高级抽象。同时，围绕这个模块，OpenResty 构建了一套完备的测试框架、调试技术以及由 Lua 实现的周边功能库。
+**它的核心是基于 NGINX 的一个 C 模块（lua-nginx-module）**，该模块将 **LuaJIT** 嵌入到 NGINX 服务器中，并对外提供一套完整的 Lua API，透明地支持非阻塞 I/O，提供了轻量级线程、定时器等高级抽象。同时，围绕这个模块，OpenResty 构建了一套完备的测试框架、调试技术以及由 Lua 实现的周边功能库。
 
 
 
@@ -74,7 +76,9 @@ OpenResty 是一个兼具开发效率和性能的服务端开发平台，**虽�
 
 ## 我与 OpenResty 的渊源
 
-说了这么多 OpenResty 的特点，我又是怎样与它结缘的呢？其实，我是在 2012 年开始接触 OpenResty 的，那会儿我正在为一个新的系统做技术选型，作为一个 Python 的忠实粉丝，我不喜欢 NGINX C 模块的艰涩，却希望得到它的高性能，鱼与熊掌想兼得。该怎么办呢？
+说了这么多 OpenResty 的特点，我又是怎样与它结缘的呢？
+
+其实，我是在 2012 年开始接触 OpenResty 的，那会儿我正在为一个新的系统做技术选型，作为一个 Python 的忠实粉丝，我不喜欢 NGINX C 模块的艰涩，却希望得到它的高性能，鱼与熊掌想兼得。该怎么办呢？
 
 
 
@@ -1166,3 +1170,643 @@ lua-resty-requests — Yet Another HTTP Library for OpenResty
 
 
 
+
+
+## 06 | OpenResty 中用到的 NGINX 知识
+
+通过前面几篇文章的介绍，相信你对 OpenResty 的轮廓已经有了一个大概的认知。下面几节课里，我会带你熟悉下 OpenResty 的两个基石：NGINX 和 LuaJIT。万丈高楼平地起，掌握些这些基础的知识，才能更好地去学习 OpenResty。
+
+
+
+今天我先来讲 NGINX。这里我只会介绍下，OpenResty 中可能会用到的一些 NGINX 基础知识，这些仅仅是 NGINX 很小的一个子集。如果你需要系统和深入学习 NGINX，可以参考陶辉老师的《[NGINX 核心知识 100 讲](https://time.geekbang.org/course/intro/138)》，这也是极客时间上评价非常高的一门课程。
+
+
+
+说到配置，其实，在 OpenResty 的开发中，我们需要注意下面几点：
+
+- 要尽可能少地配置 nginx.conf；
+- 避免使用 if、set 、rewrite 等多个指令的配合；
+- **能通过 Lua 代码解决的，就别用 NGINX 的配置、变量和模块来解决**。
+
+
+
+这样可以最大限度地提高可读性、可维护性和可扩展性。
+
+下面这段 NGINX 配置，就是一个典型的反例，可以说是把配置项当成了代码来使用：
+
+```nginx
+location ~ ^/mobile/(web/app.htm) {
+            set $type $1;
+            set $orig_args $args;
+            if ( $http_user_Agent ~ "(iPhone|iPad|Android)" ) {
+                rewrite  ^/mobile/(.*) http://touch.foo.com/mobile/$1 last;
+            }
+            proxy_pass http://foo.com/$type?$orig_args;
+}
+```
+
+这是我们在使用 OpenResty 进行开发时需要避免的。
+
+
+
+### **NGINX 配置**
+
+我们首先来看下 NGINX 的配置文件。NGINX 通过配置文件来控制自身行为，它的配置可以看作是一个简单的 DSL。NGINX 在进程启动的时候读取配置，并加载到内存中。**如果修改了配置文件，需要你重启或者重载 NGINX，再次读取后才能生效**。只有 NGINX 的商业版本，才会在运行时, 以 API 的形式提供部分动态的能力。
+
+
+
+我们先来看下面这段配置，里面的内容非常简单，我相信大部分工程师都能看懂：
+
+```nginx
+worker_processes auto;
+
+pid logs/nginx.pid;
+error_log logs/error.log notice;
+
+worker_rlimit_nofile 65535;
+
+events {
+    worker_connections 16384;
+}
+
+http {
+    server {
+  listen 80;
+  listen 443 ssl;
+
+        location / {
+      proxy_pass https://foo.com;
+      }
+    }
+}
+
+stream {
+    server {
+        listen 53 udp;
+    }
+}
+```
+
+不过，即使是简单的配置，背后也涉及到了一些很重要的基础概念。
+
+
+
+第一，每个指令都有自己适用的**上下文（Context）**，也就是 NGINX 配置文件中指令的作用域。
+
+
+
+最上层的是 main，里面是和具体业务无关的一些指令，比如上面出现的 worker_processes、pid 和 error_log，都属于 main 这个上下文。另外，上下文是有层级关系的，比如 location 的上下文（上级）是 server，server 的上下文是 http，http 的上下文是 main。
+
+
+
+指令不能运行在错误的上下文中，NGINX 在启动时会检测 nginx.conf 是否合法。比如我们把`listen 80;`  从 server 上下文换到 main 上下文，然后启动 NGINX 服务，会看到类似这样的报错：
+
+```bash
+"listen" directive is not allowed here ......
+```
+
+
+
+第二，NGINX 不仅可以处理 HTTP 请求 和 HTTPS 流量，还可以处理 UDP 和 TCP 流量。
+
+
+
+其中，七层的放在 HTTP 中，**四层的放在 stream 中**。
+
+在 OpenResty 里面， lua-nginx-module 和 stream-lua-nginx-module 分别和这俩对应。
+
+这里有一点需要注意，**NGINX 支持的功能，OpenResty 并不一定支持，需要看 OpenResty 的版本号**。OpenResty 的版本号是和 NGINX 保持一致的，所以很容易识别。比如 NGINX 在 2018 年 3 月份发布的 1.13.10 版本中，增加了对 gRPC 的支持，但 OpenResty 在 2019 年 4 月份时的最新版本是 1.13.6.2，由此可以推断 OpenResty 还不支持 gRPC。
+
+上面 nginx.conf 涉及到的配置指令，都在 NGINX 的核心模块 [ngx_core_module](http://nginx.org/en/docs/ngx_core_module.html)、[ngx_http_core_module_](http://nginx.org/en/docs/http/ngx_http_core_module.html) 和 [ngx_stream_core_module_](http://nginx.org/en/docs/stream/ngx_stream_core_module.html) 中，你可以点击这几个链接去查看具体的文档说明。
+
+
+
+### **MASTER-WORKER 模式**
+
+了解完配置文件，我们再来看下 NGINX 的多进程模式。这里我放了一张图来表示，你可以看到，NGINX 启动后，会有一个 Master 进程和多个 Worker 进程（也可以只有一个 Worker 进程，看你如何配置）。
+
+<img src="OpenResty从入门到实战.assets/a7304c2c8af0e1e6c54819c97611b992.jpg" alt="img" style="zoom:50%;" />
+
+先来说 Master 进程，一如其名，扮演“管理者”的角色，并不负责处理终端的请求。它是用来管理 Worker 进程的，包括接受管理员发送的信号量、监控 Worker 的运行状态。当 Worker 进程异常退出时，Master 进程会重新启动一个新的 Worker 进程。
+
+
+
+Worker 进程则是“一线员工”，用来处理终端用户的请求。它是从 Master 进程 fork 出来的，彼此之间相互独立，互不影响。
+
+多进程的模式比 Apache 多线程的模式要先进很多，没有线程间加锁，也方便调试。即使某个进程崩溃退出了，也不会影响其他 Worker 进程正常工作。
+
+
+
+而 OpenResty 在 NGINX Master-Worker 模式的前提下，又增加了**独有的特权进程（privileged agent）**。
+
+这个进程并不监听任何端口，和 NGINX 的 Master 进程拥有同样的权限，所以可以做一些需要高权限才能完成的任务，比如对本地磁盘文件的一些写操作等。
+
+
+
+如果**特权进程与 NGINX 二进制热升级的机制互相配合，OpenResty 就可以实现自我二进制热升级的整个流程**，而不依赖任何外部的程序。
+
+
+
+减少对外部程序的依赖，尽量在 OpenResty 进程内解决问题，不仅方便部署、降低运维成本，也可以降低程序出错的概率。可以说，OpenResty 中的特权进程、ngx.pipe 等功能，都是出于这个目的。
+
+
+
+### **执行阶段**（phase）
+
+执行阶段也是 NGINX 重要的特性，与 OpenResty 的具体实现密切相关。NGINX 有 11 个执行阶段，我们可以从 ngx_http_core_module.h 的源码中看到：
+
+```c
+typedef enum {
+    NGX_HTTP_POST_READ_PHASE = 0,
+
+    NGX_HTTP_SERVER_REWRITE_PHASE,
+
+    NGX_HTTP_FIND_CONFIG_PHASE,
+    NGX_HTTP_REWRITE_PHASE,
+    NGX_HTTP_POST_REWRITE_PHASE,
+
+    NGX_HTTP_PREACCESS_PHASE,
+
+    NGX_HTTP_ACCESS_PHASE,
+    NGX_HTTP_POST_ACCESS_PHASE,
+
+    NGX_HTTP_PRECONTENT_PHASE,
+
+    NGX_HTTP_CONTENT_PHASE,
+
+    NGX_HTTP_LOG_PHASE
+} ngx_http_phases;
+
+```
+
+如果你想详细了解这 11 个阶段的作用，可以学习陶辉老师的视频课程，或者 NGINX 文档，这里我就不再赘述。
+
+不过，巧合的是，OpenResty 也有 11 个 `*_by_lua`指令，它们和 NGINX 阶段的关系如下图所示（图片来自 lua-nginx-module 文档）：
+
+<img src="OpenResty从入门到实战.assets/2a05cb2a679bd1c81b44508666e70273.png" alt="img" style="zoom:50%;" />
+
+其中，  `init_by_lua` 只会在 Master 进程被创建时执行，`init_worker_by_lua` 只会在每个 Worker 进程被创建时执行。其他的 `*_by_lua` 指令则是由终端请求触发，会被反复执行。
+
+
+
+所以在 init_by_lua 阶段，我们可以预先加载 Lua 模块和公共的只读数据，这样可以利用操作系统的 COW（copy on write）特性，来节省一些内存。
+
+**对于业务代码来说，其实大部分的操作都可以在 content_by_lua 里面完成**，但我更推荐的做法，是根据不同的功能来进行拆分，比如下面这样：
+
+- set_by_lua：设置变量；
+- rewrite_by_lua：转发、重定向等；
+- access_by_lua：准入、权限等；
+- **content_by_lua：生成返回内容**；
+- header_filter_by_lua：**应答头**过滤处理；
+- body_filter_by_lua：应答体过滤处理；
+- log_by_lua：日志记录。
+
+我举一个例子来说明这样拆分的好处。我们假设，你对外提供了很多明文 API，现在需要增加自定义的加密和解密逻辑。那么请问，你需要修改所有 API 的代码吗？
+
+```
+# 明文协议版本
+location /mixed {
+    content_by_lua '...';       # 处理请求
+}
+
+```
+
+当然不用。事实上，利用阶段的特性，我们只需要简单地在 access 阶段解密，在 body filter 阶段加密就可以了，原来 content 阶段的代码是不用做任何修改的：
+
+```
+# 加密协议版本
+location /mixed {
+    access_by_lua '...';        # 请求体解密
+    content_by_lua '...';       # 处理请求，不需要关心通信协议
+    body_filter_by_lua '...';   # 应答体加密
+}
+```
+
+
+
+### **二进制热升级**
+
+最后，我来简单说一下 NGINX 的二进制热升级。
+
+我们知道，在你修改完 NGINX 的配置文件后，还需要重启才能生效。**但在 NGINX 升级自身版本的时候，却可以做到热升级**。这看上去有点儿本末倒置，不过，考虑到 NGINX 是从传统静态的负载均衡、反向代理、文件缓存起家的，这倒也可以理解。
+
+
+
+**热升级通过向旧的 Master 进程发送 USR2  和 WINCH 信号量来完成。对于这两步，前者的作用，是启动新的 Master 进程；后者的作用，是逐步关闭 Worker 进程**。
+
+
+
+执行完这两步后，新的 Master 和新的 Worker 就已经启动了。不过此时，旧的 Master 并没有退出。不退出的原因也很简单，如果你需要回退，依旧可以给旧的 Master 发送 HUP 信号量。当然，如果你已经确定不需要回退，就可以给旧 Master 发送 KILL 信号量来退出。
+
+
+
+至此，大功告成，二进制的热升级就完成了。
+
+关于二进制升级，我主要就讲这些。如果你想了解这方面更详细的资料，可以查阅[官方文档](http://nginx.org/en/docs/control.html#upgrade)继续学习。
+
+
+
+### **课外延伸**
+
+OpenResty 的作者多年前写过一个 [NGINX 教程](https://openresty.org/download/agentzh-nginx-tutorials-zhcn.html)，如果你对此感兴趣，可以自己学习下。这里面的内容比较多，即使看不懂也没有关系，并不会影响你学习 OpenResty。
+
+
+
+### 写在最后
+
+总的来说，在 OpenResty 中用到的都是 Nginx 的基础知识，主要涉及到配置、主从进程、执行阶段等。而**其他能用 Lua 代码解决的，尽量用代码来解决，而非使用 Nginx 的模块和配置**，这是在学习 OpenResty 中的一个思路转变。
+
+
+
+最后，我给你留了一道开放的思考题。Nginx 官方支持 NJS，也就是可以用 JS 写控制部分 Nginx 的逻辑，和 OpenResty 的思路很类似。对此，你是怎么看待的呢？
+
+
+
+## 07 | 带你快速上手 Lua
+
+在大概了解 NGINX 的基础知识后，接下来，我们就要来进一步学习 Lua 了。它是 OpenResty 中使用的编程语言，掌握它的基本语法还是很有必要的。
+
+Lua 是一个小巧精妙的脚本语言，诞生于巴西的大学实验室，这个名字在葡萄牙语里的含义是“美丽的月亮”。从作者所在的国家来看，NGINX 诞生于俄罗斯，Lua 诞生于巴西，OpenResty 诞生于中国，这三门同样精巧的开源技术都出自金砖国家，而不是欧美，也是挺有趣的一件事。
+
+
+
+回到 Lua 语言上。事实上，Lua 在设计之初，就把自己定位为一个简单、轻量、可嵌入的胶水语言，没有走大而全的路线。虽然你平常工作中可能没有直接编写 Lua 代码，但 Lua 的使用其实非常广泛。很多的网游，比如魔兽世界，都会采用 Lua 来编写插件；而键值数据库 Redis 则是内置了 Lua 来控制逻辑。
+
+
+
+另一方面，虽然 Lua 自身的库比较简单，但它可以方便地调用 C 库，大量成熟的 C 代码都可以为其所用。比如在 OpenResty 中，很多时候都需要你调用 NGINX 和 OpenSSL 的 C 函数，而这都得益于 Lua 和 LuaJIT 这种方便调用 C 库的能力。
+
+下面，我带你来快速熟悉下 Lua 的数据类型和语法，以便你后面更顺畅地学习 OpenResty。
+
+
+
+### 环境和 hello world
+
+我们不用专门去安装标准 Lua 5.1 之类的环境，**因为 OpenResty 已经不再支持标准 Lua，而只支持 LuaJIT**。这里我介绍的 Lua 语法，也是和 LuaJIT 兼容的部分，而不是基于最新的 Lua 5.3，这一点需要你特别注意。
+
+在 OpenResty 的安装目录下，你可以找到 LuaJIT 的目录和可执行文件。我这里是 Mac 环境，使用 brew 安装 OpenResty，所以你本地的路径很可能和下面的不同：
+
+```bash
+$ ll /usr/local/Cellar/openresty/1.13.6.2/luajit/bin/luajit 
+lrwxr-xr-x  1 ming  admin    18B  4  2 14:54 /usr/local/Cellar/openresty/1.13.6.2/luajit/bin/luajit -> luajit-2.1.0-beta3
+```
+
+
+
+你也可以在系统的可执行文件目录中找到它：
+
+```
+$ which luajit /usr/local/bin/luajit
+```
+
+
+
+并查看 LuaJIT 的版本号：
+
+```
+$ luajit -v
+ LuaJIT 2.1.0-beta2 -- Copyright (C) 2005-2017 Mike Pall. http://luajit.org/
+```
+
+查清楚这些信息后，你可以新建一个 `1.lua` 文件，并用 luajit 来运行其中的 hello world 代码：
+
+```
+$ cat 1.lua
+print("hello world")
+
+$ luajit 1.lua
+ hello world
+```
+
+
+
+当然，你还可以使用 `resty` 来直接运行，要知道，它最终也是用 LuaJIT 来执行的：
+
+```
+$ resty -e 'print("hello world")'
+ hello world
+```
+
+
+
+上述两种运行 hello world 的方式都是可行的。不顾对我来说，我更喜欢 `resty` 这种方式，因为后面很多 OpenResty 的代码，也都是通过 `resty` 来运行的。
+
+
+
+
+
+### 数据类型
+
+Lua 中的数据类型不多，你可以通过 `type` 函数来返回一个值的类型，比如下面这样的操作：
+
+```
+$ resty -e 'print(type("hello world")) 
+ print(type(print)) 
+ print(type(true)) 
+ print(type(360.0))
+ print(type({}))
+ print(type(nil))
+ '
+
+```
+
+会打印出如下内容：
+
+```
+ string
+ function
+ boolean
+ number
+ table
+ nil
+
+```
+
+这几种就是 Lua 中的基本数据类型了。下面我们来简单介绍一下它们。
+
+
+
+#### 字符串
+
+**在 Lua 中，字符串是不可变的值**，如果你要修改某个字符串，就等于创建了一个新的字符串。这种做法显然有利有弊：好处是即使同一个字符串出现了很多次，在内存中也只有一份；但劣势也很明显，如果你想修改、拼接字符串，会额外地创建很多不必要的字符串。
+
+
+
+我们举一个例子，来说明这个弊端。下面这段代码，是把 1 到 10 这些数字当作字符串拼接起来。对了，在 Lua 中，我们使用两个点号来表示字符串的相加：
+
+```bash
+$ resty -e 'local s  = ""
+ for i = 1, 10 do
+     s = s .. tostring(i)
+ end
+ print(s)'
+
+```
+
+
+
+这里我们循环了 10 次，但只有最后一次是我们想要的，而中间新建的 9 个字符串都是无用的。它们不仅占用了额外的空间，也消耗了不必要的 CPU 运算。
+
+当然，在后面的性能优化章节，我们会有对应的方法来解决它。
+
+另外，在 Lua 中，你有三种方式可以表达一个字符串：单引号、双引号，以及长括号（`[[]]`）。前面两种都比较好理解，别的语言一般也这么用，那么长括号有什么用处呢？
+
+我们看一个具体的示例：
+
+```bash
+$ resty -e 'print([[string has \n and \r]])'
+ string has \n and \r
+```
+
+你可以看到，长括号中的字符串不会做任何的转义处理。
+
+你也许会问另外一个问题：如果上面那段字符串中包括了长括号本身，又该怎么处理呢？答案很简单，就是在长括号中间增加一个或者多个 `=` 符号 ` [=[ xxxxxx  ]=]` ：
+
+```bash
+$ resty -e 'print([=[ string has a [[]]. ]=])'
+  string has a [[]].
+  
+$ resty -e 'print([=[ string has a [[]]]]]]]. ]=])'
+ string has a [[]]]]]]]. 
+```
+
+#### 布尔值
+
+这个很简单，true 和 false。但在 Lua 中，只有 nil 和 false 为假，其他都为真，**包括 0 和空字符串也为真**。我们可以用下面的代码印证一下：
+
+```bash
+$ resty -e 'local a = 0
+ if a then
+   print("true")
+ end
+ a = ""
+ if a then
+   print("true")
+ end'
+
+
+true
+true
+```
+
+这种判断方式和很多常见的开发语言并不一致，所以，为了避免在这种问题上出错，你可以显式地写明比较的对象，比如下面这样：
+
+```bash
+$ resty -e 'local a = 0
+ if a == false then
+   print("true")
+ end
+ '
+
+```
+
+
+
+#### 数字
+
+Lua 的 number 类型，是用双精度浮点数来实现的。值得一提的是，LuaJIT 支持 **`dual-number`（双数）模式，**也就是说， LuaJIT 会根据上下文来用整型来存储整数，而用双精度浮点数来存放浮点数。
+
+此外，LuaJIT 还支持`长长整型`的大整数LL，比如下面的例子：
+
+```bash
+$ resty -e 'print(9223372036854775807LL - 1)'
+9223372036854775806LL
+
+```
+
+#### 函数
+
+函数在 Lua 中是一等公民，你可以把函数存放在一个变量中，也可以当作另外一个函数的入参和出参。
+
+比如，下面两个函数的声明是完全等价的：
+
+```lua
+function foo()
+ end
+
+与
+
+foo = function ()
+ end
+
+```
+
+
+
+#### table
+
+table 是 Lua 中唯一的数据结构，自然非常重要，所以后面我会用专门的章节来介绍它。我们可以先来看一个简单的示例代码：
+
+```
+$ resty -e 'local color = {first = "red"}
+print(color["first"])'
+ red
+
+```
+
+
+
+#### 空值
+
+在 Lua 中，空值就是 nil。如果你定义了一个变量，但没有赋值，它的默认值就是 nil：
+
+```bash
+$ resty -e 'local a
+ print(type(a))'
+ nil
+
+```
+
+当你真正进入 OpenResty 体系中后，会发现很多种空值，比如 `ngx.null` 等等，我们后面再细聊。
+
+Lua 的数据类型，我主要就介绍这么多，先给你打个基础。一些需要重点掌握的内容，后面的文章中我们都会继续学习。在练习、使用中学习，永远是吸收新知识最便捷的方式。
+
+
+
+### 常用标准库
+
+很多时候，我们学习一门语言，其实就是在学习它的标准库。
+
+
+
+Lua 比较小巧，内置的标准库并不多。
+
+而且，在 OpenResty 的环境中，Lua 标准库的优先级是很低的。
+
+**对于同一个功能，我更推荐你优先使用 OpenResty 的 API 来解决，然后是 LuaJIT 的库函数，最后才是标准 Lua 的函数**。
+
+
+
+`OpenResty的API > LuaJIT的库函数 > 标准Lua的函数`，这个优先级后面会被反复提及，它不仅关系到是否好用这一点，更会对性能产生非常大的影响。
+
+
+
+不过，尽管如此，在实际的项目开发中，我们还是不可避免会用到一些 Lua 库。这里，我挑选了几个比较常用的标准库做下介绍，如果你想要了解更多内容，可以查阅 Lua 的官方文档。
+
+#### string 库
+
+字符串操作是我们最常用到的，也是坑最多的地方。有一个简单的原则，那就是如果涉及到正则表达式的，请一定要使用 OpenResty 提供的 `ngx.re.*` 来解决，不要用 Lua 的 `string.*` 处理。这是因为，Lua 的正则独树一帜，不符合 PCRE 的规范，我相信绝大部分工程师是玩不转的。
+
+其中 `string.byte(s [, i [, j ]])`，是比较常用到的一个 string 库函数，它返回字符 s[i]、s[i + 1]、s[i + 2]、······、s[j] 所对应的 ASCII 码。i 的默认值为 1，即第一个字节，j 的默认值为 i。
+
+
+
+下面我们来看一段示例代码：
+
+```
+$ resty -e 'print(string.byte("abc", 1, 3))
+ print(string.byte("abc", 3)) -- 缺少第三个参数，第三个参数默认与第二个相同，此时为 3
+ print(string.byte("abc"))    -- 缺少第二个和第三个参数，此时这两个参数都默认为 1
+ '
+```
+
+它的输出为：
+
+```
+ 979899
+ 99
+ 97
+
+```
+
+
+
+#### table 库
+
+在 OpenResty 的上下文中，对于 Lua 自带的 table 库，除了 `table.concat` 、`table.sort` 等少数几个函数，大部分我都不推荐使用。至于它们的细节，我们留在 LuaJIT 章节中专门来讲。
+
+这里我简单提一下`table.concat` 。`table.concat`一般用在字符串拼接的场景下，比如下面这个例子。**它可以避免生成很多无用的字符串**。
+
+```
+$ resty -e 'local a = {"A", "b", "C"}
+ print(table.concat(a))'
+
+```
+
+#### math 库
+
+Lua math 库由一组标准的数学函数构成。数学库的引入，既丰富了 Lua 编程语言的功能，同时也方便了程序的编写。
+
+在 OpenResty 的实际项目中，我们很少用 Lua 去做数学方面的运算，不过其中和随机数相关的 `math.random()` 和 `math.randomseed()` 两个函数，倒是比较常用，比如下面的这段代码，它可以在指定的范围内，随机地生成两个数字。
+
+
+
+```bash
+$ resty -e 'math.randomseed (os.time()) 
+print(math.random())
+print(math.random(100))'
+
+
+0.64918611959072
+82
+```
+
+
+
+### 虚变量
+
+了解了这些常见的标准库，接下来，我们再来学习一个新的概念——虚变量。
+
+
+
+设想这么一个场景，当一个函数返回多个值的时候，有些返回值我们并不需要，这时候，应该怎么接收这些值呢？
+
+不知道你是怎么看待这件事的，起码对我来说，要想法设法给这些用不到的变量，去赋予有意义的名字，着实是一件很折磨人的事情。
+
+
+
+还好， Lua 中可以完美地解决这一点。Lua 提供了一个**虚变量（dummy variable）**的概念， 按照惯例以一个下划线来命名，用来表示丢弃不需要的数值，仅仅起到占位的作用。
+
+
+
+下面我们以 `string.find` 这个标准库函数为例，来看虚变量的用法。这个标准库函数会返回两个值，分别代表开始和结束的下标。
+
+
+
+如果我们只需要获取开始的下标，那么很简单，只声明一个变量来接收 `string.find` 的返回值即可：
+
+```
+$ resty -e 'local start = string.find("hello", "he")
+ print(start)'
+ 1
+
+
+```
+
+但如果你只想获取结束的下标，那就必须使用虚变量了：
+
+```
+$ resty -e 'local  _, end_pos = string.find("hello", "he")
+ print(end_pos)'
+ 2
+
+```
+
+除了在返回值里使用，虚变量还经常用于循环中，比如下面这个例子：
+
+```
+$ resty -e 'for _, v in ipairs({4,5,6}) do
+     print(v)
+ end'
+ 
+ 4
+ 5
+ 6
+
+```
+
+而当有多个返回值需要忽略时，你可以重复使用同一个虚变量。这里我就不举例子了，你可以试着自己写一个这样的示例代码吗？欢迎你把代码贴在留言区里和我分享、交流。
+
+
+
+### 写在最后
+
+今天，我们一起快速地学习了标准 Lua 的数据结构和语法，相信你对这门简单精巧的语言已经有了初步的了解。下节课，我会带你了解  Lua 和 LuaJIT 的关系，LuaJIT 更是 OpenResty 中的重头戏，值得我们深入挖掘。
+
+
+
+最后，我想再为你留下一道思考题。
+
+
+
+还记得这节课讲 math 库时，学过的这段代码吗？它可以在指定范围内，随机生成两个数字。
