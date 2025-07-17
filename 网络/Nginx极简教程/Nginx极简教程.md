@@ -408,6 +408,335 @@ log_format main '$remote_addr - $remote_user [$time_local] "$request" '
 
 
 
+#### location规则
+
+> 匹配符号
+>
+
+```
+location ~ 表示使用则表达式匹配URI
+
+location xxx 没有符号表示前缀匹配
+```
+
+<img src="Nginx极简教程.assets/image-20250715181458927.png" alt="image-20250715181458927" style="zoom:50%;" />
+
+> 优先级
+
+<img src="Nginx极简教程.assets/image-20250716155438764.png" alt="image-20250716155438764" style="zoom: 50%;" />
+
+
+
+### lua脚本
+
+Nginx 本身 **不原生支持 Lua 脚本**，必须通过第三方模块才能集成 Lua 功能。。
+
+#### 基础配置
+
+##### 1. 安装 OpenResty
+
+```
+# Ubuntu/Debian
+sudo apt-get install -y openresty
+
+# CentOS/RHEL
+sudo yum install -y openresty
+```
+
+##### 2. 基本 Lua 指令
+
+```nginx
+http {
+    lua_package_path '/path/to/lua/?.lua;;';
+    lua_package_cpath '/path/to/lua/?.so;;';
+    
+    init_by_lua_block {
+        -- 初始化全局变量
+        ngx.shared.my_dict = ngx.shared.my_dict or {}
+    }
+    
+    server {
+        location /lua-test {
+            content_by_lua_block {
+                ngx.say("Hello, Lua!")
+                ngx.log(ngx.INFO, "This is a log message")
+            }
+        }
+    }
+}
+```
+
+`init_by_lua_block` 和 `init_worker_by_lua_block` 是 **OpenResty（或编译了 ngx_lua 模块的 Nginx）** 中的 **固定配置指令**，属于 Nginx Lua 模块的核心功能。
+
+**固定指令**
+
+**1. `init_by_lua_block`**
+
+**作用阶段**
+
+- **执行时机**：Nginx **主进程启动时**（Master 进程初始化阶段）
+- **执行次数**：仅执行 **1 次**
+- 典型用途：
+  - 初始化全局 Lua 变量
+  - 加载公共模块（如共享内存字典）
+  - 执行一次性配置（如启用特权代理）
+
+
+
+**2. `init_worker_by_lua_block`**
+
+**作用阶段**
+
+- **执行时机**：每个 **Worker 进程启动时**（Worker 进程初始化阶段）
+- **执行次数**：每个 Worker 进程 **各执行 1 次**
+- 典型用途：
+  - 启动定时任务（如健康检查）
+  - 初始化 Worker 级变量
+  - 执行特权代理逻辑
+
+![image-20250717145334532](Nginx极简教程.assets/image-20250717145334532.png)
+
+
+
+#### 常用 Lua 脚本示例
+
+##### 1. 访问控制
+
+```bash
+location /api {
+    access_by_lua_block {
+        local ip = ngx.var.remote_addr
+        local banned_ips = {"1.2.3.4", "5.6.7.8"}
+        
+        for _, banned_ip in ipairs(banned_ips) do
+            if ip == banned_ip then
+                ngx.exit(ngx.HTTP_FORBIDDEN)
+            end
+        end
+    }
+    
+    proxy_pass http://backend;
+}
+```
+
+
+
+##### 2. 请求验证
+
+```
+location /secure {
+    access_by_lua_block {
+        local headers = ngx.req.get_headers()
+        local token = headers["X-Auth-Token"]
+        
+        if not token or token ~= "my-secret-token" then
+            ngx.exit(ngx.HTTP_UNAUTHORIZED)
+        end
+    }
+}
+```
+
+
+
+##### 3. 动态路由
+
+```nginx
+location @dynamic_routing {
+    rewrite_by_lua_block {
+        local path = ngx.var.uri
+        local args = ngx.req.get_uri_args()
+        
+        if path:match("^/products") then
+            ngx.req.set_uri("/api/v1" .. path)
+        elseif args["version"] == "2" then
+            ngx.req.set_uri("/v2" .. path:gsub("^/api", ""))
+        end
+    }
+    
+    proxy_pass http://backend;
+}
+```
+
+**(1) `location @dynamic_routing`**
+
+- **`@` 前缀**：表示这是一个 **内部命名location**，不能直接通过URL访问，只能通过 `try_files`/`error_page` 或 Lua 跳转。
+- **用途**：作为路由逻辑的抽象层，集中处理动态路径转换。
+
+**(2) `rewrite_by_lua_block`**
+
+- **执行阶段**：Nginx 的 `rewrite` 阶段，在请求转发前修改URI或参数。
+- **优势**：比纯Nginx配置更灵活，可编程性强。
+
+**(3) `proxy_pass http://backend`**
+
+- **作用**：将处理后的请求转发到名为 `backend` 的上游服务（需在`upstream`中定义）。
+
+
+
+#### 高级功能
+
+##### 1. 共享内存字典
+
+```nginx
+http {
+    lua_shared_dict my_cache 10m;
+    
+    server {
+        location /cache {
+            content_by_lua_block {
+                local cache = ngx.shared.my_cache
+                local key = ngx.var.arg_key or "default"
+                local value = cache:get(key)
+                
+                if not value then
+                    value = "generated-value-" .. math.random(1000)
+                    cache:set(key, value, 60) -- 缓存60秒
+                end
+                
+                ngx.say("Value: ", value)
+            }
+        }
+    }
+}
+```
+
+
+
+##### 2. 协程并发请求
+
+```nginx
+location /parallel {
+    content_by_lua_block {
+        local http = require "resty.http"
+        local httpc = http.new()
+        
+        -- 并行执行多个请求
+        local res1, res2 = ngx.thread.spawn(function()
+            return httpc:request_uri("http://service1/api")
+        end), ngx.thread.spawn(function()
+            return httpc:request_uri("http://service2/api")
+        end)
+        
+        ngx.say("Result 1: ", res1.body)
+        ngx.say("Result 2: ", res2.body)
+    }
+}
+```
+
+
+
+##### 3. 自定义日志
+
+```
+log_by_lua_block {
+    local latency = tonumber(ngx.var.request_time) or 0
+    local status = ngx.var.status
+    local upstream = ngx.var.upstream_addr or "-"
+    
+    local log_entry = {
+        time = ngx.localtime(),
+        latency = latency,
+        status = status,
+        upstream = upstream,
+        uri = ngx.var.request_uri
+    }
+    
+    ngx.log(ngx.INFO, "Custom log: ", require("cjson").encode(log_entry))
+}
+```
+
+
+
+#### 性能优化技巧
+
+1. **缓存 Lua 代码**：
+
+   ```
+   lua_code_cache on; # 生产环境必须开启
+   ```
+
+2. **避免阻塞操作**：
+
+   ```
+   -- 错误示例（阻塞）
+   os.execute("sleep 1")
+   
+   -- 正确示例（非阻塞）
+   ngx.timer.at(0, function()
+       -- 后台执行
+   end)
+   ```
+
+3. **使用共享内存**：
+
+   ```
+   lua_shared_dict my_data 100m;
+   ```
+
+4. **限制缓冲区大小**：
+
+   ```
+   lua_socket_buffer_size 4k;
+   ```
+
+#### 调试与排错
+
+1. **打印变量**：
+
+   ```
+   ngx.say("DEBUG: ", require("cjson").encode(ngx.req.get_headers()))
+   ```
+
+2. **错误处理**：
+
+   ```
+   local ok, err = pcall(function()
+       -- 可能出错的代码
+   end)
+   
+   if not ok then
+       ngx.log(ngx.ERR, "Error: ", err)
+       ngx.exit(500)
+   end
+   ```
+
+3. **日志级别**：
+
+   ```
+   ngx.log(ngx.INFO, "Info message")
+   ngx.log(ngx.WARN, "Warning message")
+   ngx.log(ngx.ERR, "Error message")
+   ```
+
+#### 安全最佳实践
+
+1. **输入验证**：
+
+   ```
+   local args = ngx.req.get_uri_args()
+   if not args.id or not tonumber(args.id) then
+       ngx.exit(ngx.HTTP_BAD_REQUEST)
+   end
+   ```
+
+2. **防止脚本注入**：
+
+   ```
+   local filename = ngx.var.arg_file
+   if filename:match("[^a-zA-Z0-9%-_%.]") then
+       ngx.exit(ngx.HTTP_FORBIDDEN)
+   end
+   ```
+
+3. **限制资源使用**：
+
+   ```
+   lua_max_running_timers 100;
+   lua_max_pending_timers 1000;
+   ```
+
+
+
 
 
 ### [Http 反向代理](https://dunwu.github.io/nginx-tutorial/#/nginx-quickstart?id=http-反向代理)
@@ -529,15 +858,7 @@ http {
 }
 ```
 
-补充说明：
 
-```
-location ~ 表示使用则表达式匹配URI
-
-location xxx 没有符号表示前缀匹配
-```
-
-<img src="Nginx极简教程.assets/image-20250715181458927.png" alt="image-20250715181458927" style="zoom:50%;" />
 
 
 
@@ -1059,3 +1380,12 @@ server {
 
 
 # [Nginx 运维](https://dunwu.github.io/nginx-tutorial/#/nginx-ops?id=nginx-运维)
+
+
+
+
+
+# [Nginx 配置](https://dunwu.github.io/nginx-tutorial/#/nginx-configuration?id=nginx-配置)
+
+
+
