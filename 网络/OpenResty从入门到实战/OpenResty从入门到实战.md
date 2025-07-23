@@ -1755,7 +1755,7 @@ print(math.random(100))'
 
 
 
-还好， Lua 中可以完美地解决这一点。Lua 提供了一个**虚变量（dummy variable）**的概念， 按照惯例以一个下划线来命名，用来表示丢弃不需要的数值，仅仅起到占位的作用。
+还好， Lua 中可以完美地解决这一点。Lua 提供了一个**虚变量（dummy variable）**的概念， 按照惯例以一个**下划线**来命名，用来表示丢弃不需要的数值，仅仅起到占位的作用。
 
 
 
@@ -1810,3 +1810,867 @@ $ resty -e 'for _, v in ipairs({4,5,6}) do
 
 
 还记得这节课讲 math 库时，学过的这段代码吗？它可以在指定范围内，随机生成两个数字。
+
+
+
+
+
+## 08 | LuaJIT分支和标准Lua有什么不同？
+
+
+
+这节课，我们来学习下 OpenResty 的另一块基石：LuaJIT。今天主要的篇幅，我会留给 Lua 和 LuaJIT 中重要和鲜为人知的一些知识点。而更多 Lua 语言的基础知识，你可以通过搜索引擎或者 Lua 的书籍自己来学习，这里我推荐 Lua 作者编写的《**Lua 程序设计**》这本书。
+
+
+
+**当然，在 OpenResty 中，写出正确的 LuaJIT 代码的门槛并不高，但要写出高效的 LuaJIT 代码绝非易事**，这里的关键内容，我会在后面 OpenResty 性能优化部分详细介绍。
+
+
+
+我们先来看下 LuaJIT 在 OpenResty 整体架构中的位置：
+
+<img src="OpenResty从入门到实战.assets/cdef970a60810548b9c297e6959671ef.png" alt="img" style="zoom:50%;" />
+
+前面我们提到过，OpenResty 的 worker 进程都是 fork master 进程而得到的， 其实， master 进程中的 LuaJIT 虚拟机也会一起 fork 过来。在同一个 worker 内的所有协程，都会共享这个 LuaJIT 虚拟机，Lua 代码的执行也是在这个虚拟机中完成的。 （LuaJIT VM)
+
+这可以算是 OpenResty 的基本原理，后面课程我们再详细聊聊。今天我们先来理顺 Lua 和 LuaJIT 的关系。
+
+
+
+### 标准 Lua 和 LuaJIT 的关系
+
+先把重要的事情放在前面说：
+
+**标准 Lua 和 LuaJIT 是两回事儿，LuaJIT 只是兼容了 Lua 5.1 的语法。**
+
+
+
+标准 Lua 现在的最新版本是 5.3，LuaJIT 的最新版本则是 2.1.0-beta3。在 OpenResty 几年前的老版本中，编译的时候，你可以选择使用标准 Lua VM ，或者 LuaJIT VM 来作为执行环境，不过，现在已经去掉了对标准 Lua 的支持，只支持 LuaJIT。
+
+
+
+**LuaJIT 的语法兼容 Lua 5.1，并对 Lua 5.2 和 5.3 做了选择性支持**。所以我们应该先学习 Lua 5.1 的语法，并在此基础上学习 LuaJIT 的特性。上节课我已经带你入门了 Lua 的基础语法，今天只提及 Lua 的一些特别之处。
+
+
+
+值得注意的是，OpenResty 并没有直接使用 LuaJIT 官方提供的 2.1.0-beta3 版本，而是在此基础上，扩展了自己的 fork: [openresty-luajit2]：
+
+> OpenResty 维护了自己的 LuaJIT 分支，并扩展了很多独有的 API。
+
+这些独有的 API，都是在实际开发 OpenResty 的过程中，出于性能方面的考虑而增加的。**所以，我们后面提到的 LuaJIT，特指 OpenResty 自己维护的 LuaJIT 分支。**
+
+
+
+### 为什么选择 LuaJIT？
+
+说了这么多 LuaJIT 和 Lua 的关系，你可能会纳闷儿，为什么不直接使用 Lua，而是要用自己维护的 LuaJIT 呢？其实，最主要的原因，还是 **LuaJIT 的性能优势**。
+
+其实标准 Lua 出于性能考虑，也内置了虚拟机，所以 **Lua 代码并不是直接被解释执行的，而是先由 Lua 编译器编译为字节码（Byte Code），然后再由 Lua 虚拟机执行**。
+
+
+
+而 LuaJIT 的运行时环境，除了一个汇编实现的 Lua 解释器外，还有一个可以直接生成机器代码的 JIT 编译器。开始的时候，LuaJIT 和标准 Lua 一样，Lua 代码被编译为字节码，字节码被 LuaJIT 的解释器解释执行。
+
+
+
+但不同的是，LuaJIT 的解释器会在执行字节码的同时，记录一些运行时的统计信息，比如每个 Lua 函数调用入口的实际运行次数，还有每个 Lua 循环的实际执行次数。当这些次数超过某个随机的阈值时，便认为对应的 Lua 函数入口或者对应的 Lua 循环足够热，这时便会触发 JIT 编译器开始工作。
+
+
+
+JIT 编译器会从热函数的入口或者热循环的某个位置开始，尝试编译对应的 Lua 代码路径。编译的过程，是把 LuaJIT 字节码先转换成 LuaJIT 自己定义的中间码（IR），然后再生成针对目标体系结构的机器码。
+
+
+
+所以，**所谓 LuaJIT 的性能优化，本质上就是让尽可能多的 Lua 代码可以被 JIT 编译器生成机器码，而不是回退到 Lua 解释器的解释执行模式**。明白了这个道理，你才能理解后面学到的 OpenResty 性能优化的本质。
+
+
+
+### Lua 特别之处
+
+正如我们上节课介绍的一样，Lua 语言相对简单。对于有其他开发语言背景的工程师来说，注意 到 Lua 中一些独特的地方后，你就能很容易的看懂代码逻辑。接下来，我们一起来看 Lua 语言比较特别的几个地方。
+
+#### 1. Lua 的下标从 1 开始
+
+Lua 是我知道的唯一一个下标从 1 开始的编程语言。这一点，虽然对于非程序员背景的人来说更好理解，但却容易导致程序的 bug。
+
+下面是一个例子：
+
+```
+$ resty -e 't={100}; ngx.say(t[0])'
+```
+
+你自然期望打印出 `100`，或者报错说下标 0 不存在。但结果出乎意料，什么都没有打印出来，也没有报错。既然如此，让我们加上 `type` 命令，来看下输出到底是什么：
+
+```
+$ resty -e 't={100};ngx.say(type(t[0]))'
+nil
+```
+
+原来是空值。事实上，在 OpenResty 中，对于空值的判断和处理也是一个容易让人迷惑的点，后面我们讲到 OpenResty 的时候再细聊。
+
+
+
+
+
+#### 2. 使用 `..` 来拼接字符串
+
+这一点，上节课我也提到过。和大部分语言使用 `+` 不同，Lua 中使用两个点号来拼接字符串：
+
+```
+$ resty -e "ngx.say('hello' .. ', world')"
+hello, world
+```
+
+在实际的项目开发中，我们一般都会使用多种开发语言，而 Lua 这种不走寻常路的设计，总是会让开发者的思维，在字符串拼接的时候卡顿一下，也是让人哭笑不得。
+
+
+
+#### 3. 只有 `table` 这一种数据结构
+
+不同于 Python 这种内置数据结构丰富的语言，Lua 中只有一种数据结构，那就是 table，它里面可以包括数组和哈希表(跟php类似）：
+
+```lua
+local color = {first = "red", "blue", third = "green", "yellow"}
+print(color["first"])                 --> output: red
+print(color[1])                         --> output: blue
+print(color["third"])                --> output: green
+print(color[2])                         --> output: yellow
+print(color[3])                         --> output: nil
+```
+
+如果不显式地用`_键值对_`的方式赋值，table 就会默认用数字作为下标，从 1 开始。所以 `color[1]` 就是 blue。
+
+
+
+另外，想在 table 中获取到正确长度，也是一件不容易的事情，我们来看下面这些例子：
+
+```lua
+local t1 = { 1, 2, 3 }
+print("Test1 " .. table.getn(t1))
+
+local t2 = { 1, a = 2, 3 }
+print("Test2 " .. table.getn(t2))
+
+local t3 = { 1, nil }
+print("Test3 " .. table.getn(t3))
+
+local t4 = { 1, nil, 2 }
+print("Test4 " .. table.getn(t4))
+
+```
+
+使用 `resty` 运行的结果如下：
+
+```
+Test1 3
+Test2 2
+Test3 1
+Test4 1
+```
+
+你可以看到，除了第一个返回长度为 3 的测试案例外，后面的测试都是我们预期之外的结果。事实上，想要在 Lua 中获取 table 长度，必须注意到，只有在 table 是 `_序列_` 的时候，才能返回正确的值。
+
+
+
+那什么是序列呢？首先序列是数组（array）的子集，也就是说，table 中的元素都可以用正整数下标访问到，不存在键值对的情况。对应到上面的代码中，除了 t2 外，其他的 table 都是 array。
+
+
+
+其次，序列中不包含空洞（hole），即 nil。综合这两点来看，上面的 table 中， t1 是一个序列，而 t3 和 t4 是 array，却不是序列（sequence）。
+
+
+
+到这里，你可能还有一个疑问，为什么 t4 的长度会是 1 呢？其实这是因为，**在遇到 nil 时，获取长度的逻辑就不继续往下运行，而是直接返回了**。
+
+
+
+不知道你完全看懂了吗？这部分确实相当复杂。那么有没有什么办法可以获取到我们想要的 table 长度呢？自然是有的，OpenResty 在这方面做了扩展，在后面专门的 table 章节我会讲到，这里先留一个悬念。
+
+
+
+#### 4. 默认是全局变量
+
+我想先强调一点，除非你相当确定，否则在 Lua 中声明变量时，前面都要加上 `local`：
+
+```
+local s = 'hello'
+```
+
+
+
+这是因为在 Lua 中，变量默认是全局的，会被放到名为 `_G` 的 table 中。不加 local 的变量会在全局表中查找，这是昂贵的操作。如果再加上一些变量名的拼写错误，就会造成难以定位的 bug。
+
+
+
+所以，在 OpenResty 编程中，我强烈建议你总是使用 `local` 来声明变量，即使在 require module 的时候也是一样：
+
+```
+-- Recommended 
+local xxx = require('xxx')
+
+-- Avoid
+require('xxx')
+
+```
+
+
+
+### LuaJIT
+
+明白了 Lua 这四点特别之处，我们继续来说 LuaJIT。除了兼容 Lua 5.1 的语法并支持 JIT 外，LuaJIT 还紧密结合了 FFI（Foreign Function Interface），可以让你**直接在 Lua 代码中调用外部的 C 函数和使用 C 的数据结构**。
+
+
+
+下面是一个最简单的例子：
+
+```
+local ffi = require("ffi")
+ffi.cdef[[
+int printf(const char *fmt, ...);
+]]
+ffi.C.printf("Hello %s!", "world")
+```
+
+短短这几行代码，就可以直接在 Lua 中调用 C 的 `printf` 函数，打印出 `Hello world!`。你可以使用 `resty` 命令来运行它，看下是否成功。
+
+类似的，我们可以用 FFI 来调用 NGINX、OpenSSL 的 C 函数，来完成更多的功能。实际上，FFI 方式比传统的 Lua/C API 方式的性能更优，这也是 `lua-resty-core` 项目存在的意义。下一节我们就来专门讲讲 FFI 和 `lua-resty-core`。
+
+
+
+此外，出于性能方面的考虑，LuaJIT 还扩展了 table 的相关函数：`table.new` 和 `table.clear`。**这是两个在性能优化方面非常重要的函数**，在 OpenResty 的 lua-resty 库中会被频繁使用。不过，由于相关文档藏得非常深，而且没有示例代码，所以熟悉它们的开发者并不多。我们留到性能优化章节专门来讲它们。
+
+
+
+### 写在最后
+
+让我们来回顾下今天的内容。
+
+
+
+OpenResty 出于性能的考虑，选择了 LuaJIT 而不是标准 Lua，并且维护了自己的 LuaJIT 分支。
+
+而 LuaJIT 基于 Lua 5.1 的语法，并选择性地兼容了部分 Lua5.2 和 Lua5.3 的语法，形成了自己的体系。至于你需要掌握的 Lua 语法，在下标、字符串拼接、数据结构和变量上，都有自己鲜明的特点，在写代码的时候你应该特别留意。
+
+
+
+## 09 | 为什么 lua-resty-core 性能更高一些？
+
+前面两节课我们说了，Lua 是一种嵌入式开发语言，核心保持了短小精悍，你可以在 Redis、NGINX 中嵌入 Lua，来帮助你更灵活地完成业务逻辑。同时，Lua 也可以调用已有的 C 函数和数据结构，避免重复造轮子。
+
+
+
+在 Lua 中，你可以用 Lua C API 来调用 C 函数，而在 LuaJIT 中还可以使用 FFI。对 OpenResty 而言：
+
+
+
+- 在核心的 lua-nginx-module 中，调用 C 函数的 API，都是使用 Lua C API 来完成的；
+- 而在 lua-resty-core 中，则是把 lua-nginx-module 已有的部分 API，使用 FFI 的模式重新实现了一遍。
+
+
+
+看到这里你估计纳闷了：为什么要用 FFI 重新实现一遍？
+
+
+
+别着急，让我们以 [ngx.base64_decode](https://github.com/openresty/lua-nginx-module#ngxdecode_base64) 这个很简单的 API 为例，一起看下 Lua C API 和 FFI 的实现有何不同之处，这样你也可以对它们的性能有个直观的认识。
+
+
+
+
+
+## 12 | 高手秘诀：识别Lua的独有概念和坑
+
+上一节中，我们一起了解了 LuaJIT 中 table 相关的库函数。除了这些常用的函数外，今天我再为你介绍一些 Lua 独有的或不太常用的概念，以及 OpenResty 中常见的 Lua 的坑。
+
+
+
+### 弱表
+
+首先是 `弱表`（weak table），它是 Lua 中很独特的一个概念，和垃圾回收相关。和其他高级语言一样，**Lua 是自动垃圾回收的**，你不用关心具体的实现，也不用显式 GC。没有被引用到的空间，会被垃圾收集器自动完成回收。
+
+
+
+但简单的**引用计数**还不太够用，有时候我们需要一种更灵活的机制。
+
+举个例子，我们把一个 Lua 的对象 `Foo`（table 或者函数）插入到 table `tb` 中，这就会产生对这个对象 `Foo` 的引用。
+
+即使没有其他地方引用 `Foo`，`tb` 对它的引用也还一直存在，那么 GC 就没有办法回收 `Foo` 所占用的内存。
+
+这时候，我们就只有两种选择：
+
+- 一是手工释放 Foo；
+- 二是让它常驻内存。
+
+比如下面这段代码：
+
+```bash
+$ resty -e 'local tb = {}
+tb[1] = {red}
+tb[2] = function() print("func") end
+print(#tb) -- 2
+
+collectgarbage() -- cg 垃圾回收
+print(#tb) -- 2
+
+table.remove(tb, 1)
+print(#tb) -- 1
+'
+```
+
+不过，你肯定不希望，内存一直被用不到的对象占用着吧，特别是 LuaJIT 中还有 2G 内存的上限。而手工释放的时机并不好把握，也会增加代码的复杂度。
+
+那么这时候，就轮到弱表来大显身手了。看它的名字，弱表，首先它是一个表，然后这个表里面的所有元素都是弱引用。概念总是抽象的，让我们先来看一段稍加修改后的代码：
+
+```bash
+$ resty -e 'local tb = {}
+tb[1] = {red}
+tb[2] = function() print("func") end
+setmetatable(tb, {__mode = "v"})
+print(#tb)  -- 2
+
+collectgarbage()
+print(#tb) -- 0
+'
+```
+
+可以看到，没有被使用的对象都被 GC 了。这其中，最重要的就是下面这一行代码：
+
+```
+setmetatable(tb, {__mode = "v"})
+```
+
+是不是似曾相识？这不就是元表的操作吗！没错，当一个 table 的元表中存在 `__mode` 字段时，这个 table 就是弱表（weak table）了。
+
+- 如果 __mode 的值是 k，那就意味着这个 table 的 键 是弱引用。
+- 如果 __mode 的值是 v，那就意味着这个 table 的 值 是弱引用。
+- 当然，你也可以设置为 kv，表明这个表的键和值都是弱引用。
+
+
+
+这三者中的任意一种弱表，只要它的 `键` 或者 `值` 被回收了，那么对应的**整个**`键值` 对象都会被回收。
+
+在上面的代码示例中，`__mode` 的值 `v`，而`tb` 是一个数组，数组的 `value` 则是 table 和函数对象，所以可以被自动回收。
+
+不过，如果你把`__mode` 的值改为 `k`，就不会 GC 了，比如看下面这段代码：
+
+```go
+$ resty -e 'local tb = {}
+tb[1] = {red}
+tb[2] = function() print("func") end
+setmetatable(tb, {__mode = "k"})
+print(#tb)  -- 2
+
+collectgarbage()
+print(#tb) -- 2
+'
+```
+
+
+
+请注意，这里我们只演示了 `value` 为弱引用的弱表，也就是数组类型的弱表。自然，你同样可以把对象作为 `key`，来构建哈希表类型的弱表，比如下面这样写：
+
+```bash
+$ resty -e 'local tb = {}
+tb[{color = red}] = "red"
+local fc = function() print("func") end
+tb[fc] = "func"
+fc = nil
+
+setmetatable(tb, {__mode = "k"})
+for k,v in pairs(tb) do
+     print(k) 
+     print(v)
+end
+
+collectgarbage()
+print("----------")
+for k,v in pairs(tb) do
+     print(k)
+     print(v)
+end
+'
+
+==》
+function: 0x7f1c86f32930
+func
+
+red
+----------
+```
+
+在手动调用 `collectgarbage()` 进行强制 GC 后，`tb` 整个 table 里面的元素，就已经全部被回收了。当然，**在实际的代码中，我们大可不必手动调用 `collectgarbage()`，它会在后台自动运行，无须我们担心**。
+
+
+
+不过，既然提到了 `collectgarbage()` 这个函数，我就再多说几句。这个函数其实可以传入多个不同的选项，且默认是 `collect`，即完整的 GC。
+
+另一个比较有用的是 `count`，它可以返回 Lua 占用的内存空间大小。这个统计数据很有用，可以让你看出是否存在内存泄漏，也可以提醒我们不要接近 2G 的上限值。
+
+
+
+弱表相关的代码，在实际应用中会写得比较复杂，不太容易理解，相对应的，也会隐藏更多的 bug。具体有哪些呢？不必着急，后面内容，我会专门介绍一个开源项目中，使用弱表带来的内存泄漏问题。
+
+
+
+
+
+### 闭包和 upvalue
+
+再来看闭包和 upvalue。前面我强调过，在 Lua 中，所有的值都是一等公民，包含函数也是。
+
+这就意味着函数可以保存在变量中，当作参数传递，以及作为另一个函数的返回值。
+
+比如在上面弱表中出现的这段示例代码：
+
+```
+tb[2] = function() print("func") end
+```
+
+
+
+其实就是把一个匿名函数，作为 table 的值给存储了起来。
+
+在 Lua 中，下面这段代码中动两个函数的定义是完全等价的。不过注意，后者是把函数赋值给一个变量，这也是我们经常会用到的一种方式：
+
+```lua
+local function foo() print("foo") end
+local foo = fuction() print("foo") end
+```
+
+另外，Lua 支持把一个函数写在另外一个函数里面，即嵌套函数，比如下面的示例代码：
+
+```lua
+$ resty -e '
+local function foo()
+     local i = 1
+     local function bar()
+         i = i + 1
+         print(i)
+     end
+     return bar
+end
+
+local fn = foo()
+print(fn()) -- 2
+'
+```
+
+你可以看到， `bar` 这个函数可以读取函数 `foo` 里面的局部变量 `i`，并修改它的值，即使这个变量并不在 `bar` 里面定义。
+
+这个特性叫做**词法作用域（lexical scoping）**。
+
+
+
+事实上，Lua 的这些特性正是闭包的基础。所谓`闭包` ，简单地理解，它其实是一个函数，不过它访问了另外一个函数词法作用域中的变量。
+
+
+
+如果按照闭包的定义来看，Lua 的所有函数实际上都是闭包，即使你没有嵌套。这是因为 Lua 编译器会把 Lua 脚本外面，再包装一层主函数。比如下面这几行简单的代码段：
+
+```
+local foo, bar
+local function fn()
+     foo = 1
+     bar = 2
+end
+
+```
+
+在编译后，就会变为下面的样子：
+
+```
+function main(...)
+     local foo, bar
+     local function fn()
+         foo = 1
+         bar = 2
+     end
+end
+
+```
+
+而函数 `fn` 捕获了主函数的两个局部变量，因此也是闭包。
+
+当然，我们知道，很多语言中都有闭包的概念，它并非 Lua 独有，你也可以对比着来加深理解。只有理解了闭包，你才能明白我们接下来要讲的 upvalue。
+
+
+
+> upvalue 
+
+upvalue 就是 Lua 中独有的概念了。从字面意思来看，可以翻译成 `上面的值`。实际上，upvalue 就是闭包中捕获的自己词法作用域外的那个变量。还是继续看上面那段代码：
+
+```lua
+local foo, bar
+local function fn()
+     foo = 1
+     bar = 2
+end
+
+```
+
+你可以看到，函数 `fn` 捕获了两个不在自己词法作用域的局部变量 `foo` 和 `bar`，而这两个变量，实际上就是函数 `fn` 的 upvalue。
+
+
+
+### 常见的坑
+
+介绍了 Lua 中的几个概念后，我再来说说，在 OpenResty 开发中遇到的那些和 Lua 相关的坑。
+
+
+
+在前面内容中，我们提到了一些 Lua 和其他开发语言不同的点，比如下标从 1 开始、默认全局变量等等。在 OpenResty 实际的代码开发中，我们还会遇到更多和 Lua、 LuaJIT 相关的问题点， 下面我会讲其中一些比较常见的。
+
+
+
+这里要先提醒一下，即使你知道了所有的 `坑`，但不可避免的，估计还是要自己踩过之后才能印象深刻。当然，不同的是，你能够更块地从坑里面爬出来，并找到症结所在。
+
+
+
+#### 下标从 0 开始还是从 1 开始
+
+第一个坑，Lua 的下标是从 1 开始的，这点我们之前反复提及过。但我不得不说，这并非事实的全部。
+
+因为在 LuaJIT 中，使用 `ffi.new` 创建的数组，下标又是从 0 开始的:
+
+```
+local buf = ffi_new("char[?]", 128)
+```
+
+所以，如果你要访问上面这段代码中 `buf` 这个 cdata，请记得下标从 0 开始，而不是 1。在使用 FFI 和 C 交互的时候，一定要特别注意这个地方。
+
+
+
+#### 正则模式匹配
+
+第二个坑，正则模式匹配问题。OpenResty 中并行着两套字符串匹配方法：Lua 自带的 `sting` 库，以及 OpenResty 提供的 `ngx.re.*` API。
+
+其中， Lua 正则模式匹配是自己独有的格式，和 PCRE 的写法不同。下面是一个简单的示例：
+
+```
+resty -e 'print(string.match("foo 123 bar", "%d%d%d"))'  — 123
+```
+
+
+
+这段代码从字符串中提取了数字部分，你会发现，它和我们的熟悉的正则表达式完全不同。Lua 自带的正则匹配库，不仅代码维护成本高，而且性能低——不能被 JIT，而且被编译过一次的模式也不会被缓存。
+
+
+
+所以，在你使用 Lua 内置的 string 库去做 find、match 等操作时，如果有类似正则这样的需求，不用犹豫，请直接使用 OpenResty 提供的 `ngx.re` 来替代。只有在查找固定字符串的时候，我们才考虑使用 plain 模式来调用 string 库。
+
+
+
+**这里我有一个建议：在 OpenResty 中，我们总是优先使用 OpenResty 的 API，然后是 LuaJIT 的 API，使用 Lua 库则需要慎之又慎**。
+
+
+
+#### json 编码时无法区分 array 和 dict
+
+第三个坑，json 编码时无法区分 array 和 dict。由于 Lua 中只有 table 这一个数据结构，所以在 json 对空 table 编码的时候，自然就无法确定编码为数组还是字典：
+
+```
+resty -e 'local cjson = require "cjson"
+local t = {}
+print(cjson.encode(t))
+'
+```
+
+比如上面这段代码，它的输出是 `{}`，由此可见， OpenResty 的 cjson 库，默认把空 table 当做字典来编码。当然，我们可以通过 `encode_empty_table_as_object` 这个函数，来修改这个全局的默认值：
+
+```
+resty -e 'local cjson = require "cjson"
+cjson.encode_empty_table_as_object(false)
+local t = {}
+print(cjson.encode(t))
+'
+
+```
+
+这次，空 table 就被编码为了数组：`[]`。
+
+不过，全局这种设置的影响面比较大，那能不能指定某个 table 的编码规则呢？答案自然是可以的，我们有两种方法可以做到。
+
+第一种方法，把 `cjson.empty_array` 这个 userdata 赋值给指定 table。这样，在 json 编码的时候，它就会被当做空数组来处理：
+
+```bash
+$ resty -e 'local cjson = require "cjson"
+local t = cjson.empty_array
+print(cjson.encode(t))
+'
+```
+
+不过，有时候我们并不确定，这个指定的 table 是否一直为空。我们希望当它为空的时候编码为数组，那么就要用到 `cjson.empty_array_mt` 这个函数，也就是我们的第二个方法。
+
+它会标记好指定的 table，当 table 为空时编码为数组。从`cjson.empty_array_mt` 这个命名你也可以看出，它是通过 metatable 的方式进行设置的，比如下面这段代码操作：
+
+```bash
+$ resty -e 'local cjson = require "cjson"
+local t = {}
+setmetatable(t, cjson.empty_array_mt)
+print(cjson.encode(t))
+t = {123}
+print(cjson.encode(t))
+'
+==>
+[]
+[123]
+
+
+$ resty -e 'local cjson = require "cjson"
+local t = {}
+print(cjson.encode(t))
+t = {123}
+print(cjson.encode(t))
+'
+==>
+{}
+[123]
+```
+
+
+
+#### 变量的个数限制
+
+再来看第四个坑，变量的个数限制问题。 Lua 中，一个函数的局部变量的个数，和 upvalue 的个数都是有上限的，你可以从 Lua 的源码中得到印证：
+
+```config
+
+/*
+@@ LUAI_MAXVARS is the maximum number of local variables per function
+@* (must be smaller than 250).
+*/
+#define LUAI_MAXVARS            200
+
+
+/*
+@@ LUAI_MAXUPVALUES is the maximum number of upvalues per function
+@* (must be smaller than 250).
+*/
+#define LUAI_MAXUPVALUES        60
+
+```
+
+这两个阈值，分别被硬编码为 200 和 60。虽说你可以手动修改源码来调整这两个值，不过最大也只能设置为 250。
+
+
+
+一般情况下，我们不会超过这个阈值，但写 OpenResty 代码的时候，你还是要留意这个事情，不要过多地使用局部变量和 upvalue，而是要尽可能地使用 `do .. end` 做一层封装，来减少局部变量和 upvalue 的个数。
+
+```
+local re_find = ngx.re.find
+  function foo() ... end
+function bar() ... end
+function fn() ... end
+
+```
+
+如果只有函数 `foo` 使用到了 `re_find`， 那么我们可以这样改造下：
+
+```
+do
+     local re_find = ngx.re.find
+     function foo() ... end
+end
+function bar() ... end
+function fn() ... end
+```
+
+这样一来，**在 `main` 函数的层面上，就少了 `re_find` 这个局部变量**。这在单个的大的 Lua 文件中，算是一个优化技巧。
+
+### 写在最后
+
+从“多问几个为什么”的角度出发，Lua 中 250 这个阈值是从何而来的呢？这算是我们今天的思考题，欢迎你留言说下你的看法，也欢迎你把这篇文章分享给你的同事、朋友，我们一起交流，一起进步。
+
+> chatGPT
+
+在 Lua 中，局部变量（`LUAI_MAXVARS`）和 upvalue（`LUAI_MAXUPVALUES`）的数量限制确实是一个值得探讨的设计选择。这两个阈值（默认 200 和 60，最大可调至 250）的设定并非随意为之，而是基于历史技术限制、性能权衡和实际需求的综合考量。以下是详细分析：
+
+------
+
+**1. 技术背景与历史原因**
+
+**(1) 虚拟机指令限制**
+
+Lua 的虚拟机（Lua VM）使用 **8-bit 字段** 来编码局部变量和 upvalue 的索引（在字节码中）。
+
+- **8-bit 范围**：`0-255`（理论上最多支持 256 个）
+- **预留空间**：Lua 保留了一部分索引用于内部用途（如临时变量），因此实际可用上限为 **250**。
+
+**(2) 早期硬件限制**
+
+- Lua 诞生于 1993 年，当时的硬件资源（内存、CPU）有限，较小的阈值能避免虚拟机过度消耗资源。
+- 即便在现代硬件上，保持适度限制仍有助于维持 Lua 的轻量级特性。
+
+
+
+
+
+# 其他补充
+
+
+
+## **LuaJIT 简介**
+
+LuaJIT（Just-In-Time Compiler for Lua, Luaj即时编译）是 Lua 语言的高性能实现，由 Mike Pall 开发。它在标准 Lua 的基础上增加了 **即时编译（JIT）** 技术，显著提升了执行速度，同时保持了 Lua 的轻量级和灵活性。
+
+------
+
+### **1. LuaJIT 的核心特性**
+
+**(1) 高性能 JIT 编译**
+
+- **JIT（Just-In-Time）编译**：将 Lua 代码动态编译为机器码，执行速度接近原生 C 代码。
+- **优化性能**：比标准 Lua 快 **5-100 倍**（数值计算、循环等场景尤为明显）。
+- **支持 x86/x64/ARM**：跨平台高性能运行。
+
+**(2) 完全兼容 Lua 5.1**
+
+- 语法和 API 与 Lua 5.1 完全兼容，可直接运行现有 Lua 代码。
+- 扩展部分 Lua 5.2/5.3 功能（如 `bit` 位运算库）。
+
+**(3) FFI（Foreign Function Interface）**
+
+- **直接调用 C 函数**：无需编写绑定代码，动态加载 C 库。
+
+  示例
+
+  ：
+
+  ```
+  local ffi = require("ffi")
+  ffi.cdef[[
+      int printf(const char *fmt, ...);
+  ]]
+  ffi.C.printf("Hello, %s!\n", "LuaJIT")  -- 直接调用 C 的 printf
+  ```
+
+**(4) 低内存占用**
+
+- 相比标准 Lua，内存占用更低，适合嵌入式和高并发场景。
+
+**(5) 可嵌入性**
+
+- 和标准 Lua 一样，可轻松嵌入 C/C++ 项目。
+
+------
+
+### **2. LuaJIT vs 标准 Lua**
+
+|     特性     |            LuaJIT            |    标准 Lua (5.1/5.4)     |
+| :----------: | :--------------------------: | :-----------------------: |
+| **执行速度** |    ⚡ **极快**（JIT 优化）    |    🐢 较慢（解释执行）     |
+| **内存占用** |            ✅ 更低            |          ⚖️ 稍高           |
+| **FFI 支持** |    🔥 原生支持，直接调用 C    |     ❌ 无，需手动绑定      |
+| **JIT 编译** |            ✅ 支持            |         ❌ 不支持          |
+|  **兼容性**  | Lua 5.1 + 部分 5.2/5.3 特性  | 取决于版本（5.1/5.2/5.4） |
+| **适用场景** | 高性能计算、游戏、网络服务器 | 脚本、嵌入式、轻量级应用  |
+
+------
+
+### **3. LuaJIT 的适用场景**
+
+**(1) 高性能计算**
+
+- 科学计算、数据分析（比 Python/Lua 快数十倍）。
+- **示例**：使用 FFI 调用 BLAS 加速矩阵运算。
+
+**(2) 游戏开发**
+
+- **World of Warcraft**、**Angry Birds** 等游戏使用 LuaJIT 做脚本引擎。
+- **优势**：低延迟、高帧率。
+
+**(3) 网络服务器**
+
+- **OpenResty**（Nginx + LuaJIT）用于高性能 API 网关、Web 服务。
+
+- 示例：
+
+  ```
+  -- OpenResty 示例
+  location /hello {
+      content_by_lua_block {
+          ngx.say("Hello, LuaJIT!")
+      }
+  }
+  ```
+
+**(4) 嵌入式系统**
+
+- 路由器、IoT 设备（如 **LEDE/OpenWRT** 使用 LuaJIT 做配置脚本）。
+
+------
+
+### **4. LuaJIT 的安装与使用**
+
+**(1) 安装 LuaJIT**
+
+- Linux/macOS：
+
+  ```
+  git clone https://luajit.org/git/luajit.git
+  cd luajit
+  make && sudo make install
+  ```
+
+- **Windows**：下载预编译二进制 luajit.org。
+
+**(2) 运行 LuaJIT**
+
+```
+luajit script.lua  # 替代 lua script.lua
+```
+
+**(3) 启用 JIT**
+
+```
+-- 默认启用 JIT，但可手动控制
+jit.on()   -- 开启 JIT（默认）
+jit.off()  -- 关闭 JIT（调试用）
+```
+
+------
+
+### **5. LuaJIT 的局限性**
+
+**(1) 不完整支持 Lua 5.2/5.3**
+
+- 如 `goto`、`bit32` 等新特性支持有限。
+- **解决方案**：尽量使用 Lua 5.1 语法。
+
+==》没有向后兼容？？？
+
+**(2) JIT 编译的代码可能不被优化**
+
+- 某些代码（如 `io.read()`）无法 JIT 编译，回退到解释执行。
+
+- 优化建议：
+
+  ```
+  -- 避免在热代码中使用不可 JIT 的操作
+  for i = 1, 1e6 do
+      -- 使用局部变量而非全局变量
+      local x = math.sin(i)  -- ✅ 可 JIT
+      -- io.read()           -- ❌ 不可 JIT
+  end
+  ```
+
+**(3) 调试工具较少**
+
+- 标准 Lua 调试器（如 **LuaDebug**）可能不完全兼容。
+
+------
+
+### **6. LuaJIT 的未来**
+
+- **LuaJIT 2.1.0-beta3** 是当前稳定版（2023 年更新）。
+- **开发活跃**：社区维护分支 LuaJIT/LuaJIT。
+
+------
+
+### **总结**
+
+✅ **LuaJIT = Lua 5.1 + JIT + FFI + 高性能**
+✅ ​**​适用场景​**​：游戏、服务器、嵌入式、科学计算
+❌ ​**​不适用​**​：需要 Lua 5.4 新特性的项目
+
+如果需要极高性能的 Lua 脚本，**LuaJIT 是最佳选择**！
