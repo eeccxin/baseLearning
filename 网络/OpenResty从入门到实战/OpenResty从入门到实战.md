@@ -3782,7 +3782,245 @@ OpenResty 现在的官方文档只有英文版本，国内工程师在阅读时�
 
 
 
+# 性能优化篇
 
+## 39 | 高性能的关键：shared dict 缓存和 lru 缓存
+
+在前面几节课中，我已经把 OpenResty 自身的优化技巧和性能调优的工具都介绍过了，分别涉及到字符串、table、Lua API、LuaJIT、SystemTap、火焰图等。
+
+
+
+这些都是系统优化的基石，需要你好好掌握。但是，只懂得它们，还是不足以面对真实的业务场景。在一个稍微复杂一些的业务中，保持高性能是一个系统性的工作，并不仅仅是代码和网关层面的优化。它会涉及到数据库、网络、协议、缓存、磁盘等各个方面，这也正是架构师存在的意义。
+
+今天这节课，就让我们一起来看下，性能优化中扮演非常关键角色的组件——**缓存**，看看它在 OpenResty 中是如何使用和进行优化的。
+
+
+
+### 缓存
+
+在硬件层面，大部分的计算机硬件都会用缓存来提高速度，比如 CPU 会有多级缓存，RAID 卡也有读写缓存。而在软件层面，我们用的数据库就是一个缓存设计非常好的例子。在 SQL 语句的优化、索引设计以及磁盘读写的各个地方，都有缓存。
+
+
+
+这里，我也建议你在设计自己的缓存之前，先去了解下 MySQL 里面的各种缓存机制。我给你推荐的资料是《High Performance MySQL》 这本非常棒的书。
+
+我在多年前负责数据库的时候，从这本书中获益良多，而且后来不少其他的优化场景，也借鉴了 MySQL 的设计。
+
+
+
+回到缓存上来说，我们知道，一个生产环境的缓存系统，需要根据自己的业务场景和系统瓶颈，来找出最好的方案。这是一门平衡的艺术。
+
+一般来说，缓存有两个原则。
+
+- 一是**越靠近用户的请求越好**。比如，能用本地缓存的就不要发送 HTTP 请求，能用 CDN 缓存的就不要打到源站，能用 OpenResty 缓存的就不要打到数据库。
+- 二是**尽量使用本进程和本机的缓存解决**。因为跨了进程和机器甚至机房，缓存的网络开销就会非常大，这一点在高并发的时候会非常明显。
+
+
+
+自然，在 OpenResty 中，缓存的设计和使用也遵循这两个原则。OpenResty 中有两个缓存的组件：**shared dict 缓存和 lru 缓存**。前者只能缓存字符串对象，缓存的数据有且只有一份，每一个 worker 都可以进行访问，所以常用于 worker 之间的数据通信。后者则可以缓存所有的 Lua 对象，但只能在单个 worker 进程内访问，有多少个 worker，就会有多少份缓存数据。
+
+
+
+下面这两个简单的表格，可以说明 shared dict 和 lru 缓存的区别：
+
+<img src="OpenResty从入门到实战.assets/baa08571c1ca48585d14a6141e2f00cd.png" alt="img" style="zoom: 67%;" />
+
+
+
+<img src="OpenResty从入门到实战.assets/c3f7415b4cb793a556f27b08da370ca9.png" alt="img" style="zoom:67%;" />
+
+
+
+shared dict 和 lru 缓存，并没有哪一个更好的说法，而是应该根据你的场景来配合使用。
+
+- 如果你没有 worker 之间共享数据的需求，那么 lru 可以缓存数组、函数等复杂的数据类型，并且性能最高，自然是首选。
+- 但如果你需要在 worker 之间共享数据，那就可以在 lru 缓存的基础上，加上 shared dict 的缓存，构成两级缓存的架构。
+
+接下来，我们具体来看看这两种缓存方式。
+
+### 共享字典缓存
+
+在 Lua 章节中，我们已经对 shared dict 做了具体的介绍，这里先简单回顾下它的使用方法：
+
+```lua
+$ resty --shdict='dogs 1m' -e 'local dict = ngx.shared.dogs
+                               dict:set("Tom", 56)
+                               print(dict:get("Tom"))'
+```
+
+你需要事先在 Nginx 的配置文件中，**声明一个内存区 dogs**（由开发者自定义的共享内存区域名称），然后在 Lua 代码中才可以使用。如果你在使用的过程中，发现给 dogs 分配的空间不够用，那么是需要先修改 Nginx 配置文件，然后重新加载 Nginx 才能生效的。因为我们并不能在运行时进行扩容和缩容。
+
+
+
+下面，我们重点聊下，在共享字典缓存中，和性能相关的几个问题。
+
+
+
+#### 缓存数据的序列化
+
+第一个问题，缓存数据的序列化。由于共享字典中只能缓存字符串对象，所以，如果你想要缓存数组，就少不了要在 set 的时候要做一次序列化，在 get 的时候做一次反序列化：
+
+```
+resty --shdict='dogs 1m' -e 'local dict = ngx.shared.dogs
+                        dict:set("Tom", require("cjson").encode({a=111}))
+                        print(require("cjson").decode(dict:get("Tom")).a)'
+```
+
+不过，这类序列化和反序列化操作是非常消耗 CPU 资源的。如果每个请求都有那么几次这种操作，那么，在**火焰图**上你就能很明显地看到它们的消耗。
+
+所以，如何在共享字典里避免这种消耗呢？其实这里并没有什么好的办法，要么在业务层面避免把数组放到共享字典里面；要么自己去手工拼接字符串为 JSON 格式，当然，这也会带来字符串拼接的性能消耗，以及可能会隐藏更多的 bug 在其中。
+
+
+
+大部分的序列化都是可以在业务层面进行拆解的。你可以把数组的内容打散，分别用字符串的形式存储在共享字典中。如果还不行的话，那么也可以把数组缓存在 lru 中，用内存空间来换取程序的便捷性和性能。
+
+
+
+此外，**缓存中的 key 也应该尽量选择短和有意义的，这样不仅可以节省空间，也方便后续的调试**。
+
+
+
+#### stale 数据
+
+共享字典中还有一个 `get_stale` 的读取数据的方法，相比 `get` 方法，多了一个过期数据的返回值：
+
+```
+resty --shdict='dogs 1m' -e 'local dict = ngx.shared.dogs
+                            dict:set("Tom", 56, 0.01)
+                            ngx.sleep(0.02)
+                             local val, flags, stale = dict:get_stale("Tom")
+                            print(val)'
+
+```
+
+在上面的这个示例中，数据只在共享字典中缓存了 0.01 秒，在 set 后的 0.02 秒后，数据就已经超时了。这时候，通过 get 接口就不会获取到数据了，但通过 `get_stale` 还可能获取到过期的数据。这里我之所以用“可能”两个字，是因为过期数据所占用的空间，是有一定几率被回收，再给其他数据使用的，这也就是 LRU 算法。
+
+看到这里，你可能会有疑惑吗：获取已经过期的数据有什么用呢？不要忘记了，我们在 shared dict 中存放的是缓存数据，即使缓存数据过期了，也并不意味着源数据就一定有更新。
+
+
+
+举个例子，数据源存储在 MySQL 中，我们从 MySQL 中获取到数据后，在 shared dict 中设置了 5 秒超时，那么，当这个数据过期后，我们就会有两个选择：
+
+- 当这个数据不存在时，重新去 MySQL 中再查询一次，把结果放到缓存中；
+- 判断 MySQL 的数据是否发生了变化，如果没有变化，就把缓存中过期的数据读取出来，修改它的过期时间，让它继续生效。
+
+
+
+很明显，后者是更优化的方案，这样可以尽可能少地去和 MySQL 交互，让终端的请求都从最快的缓存中获取数据。
+
+这时候，如何判断数据源中的数据是否发生了变化，就成为了我们需要考虑和解决的问题。接下来，让我们以 lru 缓存为例，看看一个实际的项目是如何来解决这个问题的。
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+### lru 缓存
+
+> LRU（Least Recently Used， 最近最少使用）
+
+lru 缓存的接口只有 5 个：`new`、`set`、`get`、`delete` 和 `flush_all`。和上面问题相关的就只有 `get` 接口，让我们先来了解下这个接口是如何使用的：
+
+`require "resty.lrucache"`
+
+```lua
+resty -e 'local lrucache = require "resty.lrucache"
+local cache, err = lrucache.new(200)
+cache:set("dog", 32, 0.01)
+ngx.sleep(0.02)
+local data, stale_data = cache:get("dog")
+print(stale_data)'
+```
+
+你可以看到，在 lru 缓存中， get 接口的第二个返回值直接就是 `stale_data`，而不是像 shared dict 那样分为了 `get` 和 `get_stale` 两个不同的 API。这样的接口封装，对于使用过期数据来说显然更加友好。
+
+
+
+**在实际的项目中，我们一般推荐使用版本号来区分不同的数据**，这样，在数据发声变化后，它的版本号也就跟着变了。比如，在 etcd 中的 `modifiedIndex` ，就可以拿来当作版本号，来标记数据是否发生了变化。有了版本号的概念后，我们就可以对 lru 缓存做一个简单的二次封装，比如来看下面的伪码，摘自
+
+https://github.com/iresty/apisix/blob/master/lua/apisix/core/lrucache.lua ：
+
+```lua
+local function (key, version, create_obj_fun, ...)
+    local obj, stale_obj = lru_obj:get(key)
+    -- 如果数据没有过期，并且版本没有变化，就直接返回缓存数据
+    if obj and obj._cache_ver == version then
+        return obj
+    end
+
+    -- 如果数据已经过期，但还能获取到，并且版本没有变化，就直接返回缓存中的过期数据
+    if stale_obj and stale_obj._cache_ver == version then
+        lru_obj:set(key, obj, item_ttl)
+        return stale_obj
+    end
+
+    -- 如果找不到过期数据，或者版本号有变化，就从数据源获取数据
+    local obj, err = create_obj_fun(...)
+    obj._cache_ver = version
+    lru_obj:set(key, obj, item_ttl)
+    return obj, err
+end
+
+```
+
+
+
+从这段代码中你可以看到，我们通过引入版本号的概念，在版本号没有变化的情况下，充分利用了过期数据来减少对数据源的压力，达到了性能的最优。
+
+除此之外，在上面的方案中，其实还有一个潜在的很大优化点，那就是我们把 key 和版本号做了分离，把版本号作为 value 的一个属性。
+
+我们知道，更常规的做法是把版本号写入 key 中。比如 key 的值是 `key_1234`，这种做法非常普遍，但在 OpenResty 的环境下，这样其实是存在浪费的。为什么这么说呢？
+
+举个例子你就明白了。假如版本号每分钟变化一次，那么`key_1234` 过一分钟就变为了 `key_1235`，一个小时就会重新生成 60 个不同的 key，以及 60 个 value。这也就意味着， Lua GC 需要回收 59 个键值对背后的 Lua 对象。如果你的更新更加频繁，那么对象的新建和 GC 显然会消耗更多的资源。
+
+当然，这些消耗也可以很简单地避免，那就是把版本号从 key 挪到 value 中。这样，一个 key 不管更新地多么频繁，也只有固定的两个 Lua 对象。可以看出，这样的优化技巧非常巧妙，不过，简单巧妙的技巧背后，其实需要你对 OpenResty 的 API 以及缓存的机制都有很深入的了解才可以。
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+## 40 | 缓存与风暴并存，谁说缓存风暴不可避免？
 
 
 
@@ -4182,6 +4420,8 @@ ngx.say(rx:match("/aa", {host = "foo.com",
 
 ### schema
 
+> **schema**（结构/模式/架构/图式/概要)，在数据库和计算机科学中，它定义了数据的组织结构和约束规则。
+
 schema 的选择其实要容易得多，我们在前面介绍过的 `lua-rapidjson` ，就是非常好的一个选择。这部分你完全没有必要自己去写一个，json schema 已经足够强大了。下面就是一个简单的示例：
 
 ```
@@ -4251,6 +4491,473 @@ local schema = {
 
 
 那么，在你的实际工作中，你是否使用过 API 网关呢？你们公司又是如何做 API 网关的选型的呢？
+
+
+
+## 49 | 微服务API网关搭建三步曲（三）
+
+今天这节课，微服务 API 网关搭建就到了最后的环节了。让我们用一个最小的示例来把之前选型的组件，按照设计的蓝图，拼装运行起来吧！
+
+### Nginx 配置和初始化
+
+我们知道，API 网关是用来处理流量入口的，所以我们首先需要在 Nginx.conf 中做简单的配置，让所有的流量都通过网关的 Lua 代码来处理。
+
+```
+server {
+    listen 9080;
+
+    init_worker_by_lua_block {
+        apisix.http_init_worker()
+    }
+
+    location / {
+        access_by_lua_block {
+            apisix.http_access_phase()
+        }
+        header_filter_by_lua_block {
+            apisix.http_header_filter_phase()
+        }
+        body_filter_by_lua_block {
+            apisix.http_body_filter_phase()
+        }
+        log_by_lua_block {
+            apisix.http_log_phase()
+        }
+    }
+}
+```
+
+这里我们使用开源 API 网关 [APISIX](https://github.com/apache/apisix)  为例，所以上面的代码示例中带有 `apisix` 的关键字。在这个示例中，我们监听了 9080 端口，并通过 `location /` 的方式，把这个端口的所有请求都拦截下来，并依次通过 `access`、`rewrite`、`header filter`、`body filter` 和 `log` 这几个阶段进行处理，在每个阶段中都会去调用对应的插件函数。其中， `rewrite` 阶段便是在 `apisix.http_access_phase` 函数中合并处理的。
+
+
+
+而对于系统初始化的工作，我们放在了 `init_worker` 阶段来处理，这其中包含了读取各项配置参数、预制 etcd 中的目录、从 etcd 中获取插件列表、对于插件按照优先级进行排序等。我这里列出了关键部分的代码并进行讲解，当然，你可以在 GitHub 上看到更完整的[初始化函数](https://github.com/apache/apisix/blob/master/lua/apisix.lua#L47)。
+
+```
+function _M.http_init_worker()
+-- 分别初始化路由、服务和插件这三个最重要的部分
+    router.init_worker()
+    require("apisix.http.service").init_worker()
+    require("apisix.plugin").init_worker()
+end
+```
+
+
+
+### 匹配路由
+
+在最开始的 `access` 阶段里面，我们首先需要做的就是匹配路由，根据请求中携带 uri、host、args、cookie 等，来和已经设置好的路由规则进行匹配：
+
+```
+router.router_http.match(api_ctx)
+```
+
+对外暴露的，其实只有上面一行代码，这里的`api_ctx` 中存放的就是 uri、host、args、cookie 这些请求的信息。而具体的 `match` 函数的[实现](https://github.com/apache/apisix/blob/master/apisix/http/router/radixtree_uri.lua)，就用到了我们前面提到过的 `lua-resty-radixtree`。如果没有命中，就说明这个请求并没有设置与之对应的上游，就会直接返回 404。
+
+```lua
+local router = require("resty.radixtree")
+
+local match_opts = {}
+
+function _M.match(api_ctx)
+    -- 从 ctx 中获取请求的参数，作为路由的判断条件
+    match_opts.method = api_ctx.var.method
+    match_opts.host = api_ctx.var.host
+    match_opts.remote_addr = api_ctx.var.remote_addr
+    match_opts.vars = api_ctx.var
+    -- 调用路由的判断函数 
+    local ok = uri_router:dispatch(api_ctx.var.uri, match_opts, api_ctx)
+    -- 没有命中路由就直接返回 404 
+    if not ok then
+        core.log.info("not find any matched route")
+        return core.response.exit(404)
+    end
+
+    return true
+end
+
+```
+
+### 加载插件
+
+当然，如果路由可以命中，就会走到过滤插件和加载插件的步骤，这也是 API 网关的核心所在。我们先来看下面这段代码：
+
+```lua
+local plugins = core.tablepool.fetch("plugins", 32, 0)
+-- etcd 中的插件列表和本地配置文件中的插件列表进行交集运算 
+api_ctx.plugins = plugin.filter(route, plugins)
+
+-- 依次运行插件在 rewrite 和 access 阶段挂载的函数 
+run_plugin("rewrite", plugins, api_ctx)
+run_plugin("access", plugins, api_ctx)
+
+```
+
+在这段代码中，我们首先通过 table pool 的方式，申请了一个长度为 32 的 table，这是我们之前介绍过的性能优化技巧。然后便是插件的过滤函数。你可能疑惑，为什么需要这一步呢？在插件的 `init worker` 阶段，我们不是已经从 etcd 中获取插件列表并完成排序了吗？
+
+
+
+事实上，这里的过滤是和本地配置文件来做对比的，主要有下面两个原因。
+
+- 第一，新开发的插件需要灰度来发布，这时候新插件在 etcd 的列表中存在，但只在部分网关节点中处于开启状态。所以，我们需要额外做一次交集的运算。
+- 第二，为了支持 debug 模式。终端的请求经过了哪些插件的处理？这些插件的加载顺序是什么？这些信息在调试的时候会很有用，所以在过滤函数中也会判断其是否处于 debug 模式，并在响应头中记录下这些信息。
+
+因此，在 access 阶段的最后，我们会把这些过滤好的插件，按照优先级逐个运行，如下面这段代码所示：
+
+```
+local function run_plugin(phase, plugins, api_ctx)
+    for i = 1, #plugins, 2 do
+        local phase_fun = plugins[i][phase]
+        if phase_fun then
+            -- 最核心的调用代码 
+            phase_fun(plugins[i + 1], api_ctx)
+        end
+    end
+
+    return api_ctx
+end
+
+```
+
+你可以看到，在遍历插件的时候，我们是以 `2` 为间隔进行的，这是因为每个插件都会有两个部分组成：插件对象和插件的配置参数。现在，我们来看上面示例代码中最核心的那一行代码：
+
+```
+phase_fun(plugins[i + 1], api_ctx)
+```
+
+单独看这行代码会有些抽象，我们用一个具体的 `limit_count` 插件来替换一下，就会清楚很多：
+
+```
+limit_count_plugin_rewrite_function(conf_of_plugin, api_ctx)
+```
+
+到这里，API 网关的整体流程，我们就实现得差不多了。这些代码都在同一个代码[文件](https://github.com/apache/apisix/blob/master/apisix/init.lua)中，它里面有 400 多行代码，但核心的代码就是我们上面所介绍的这短短几十行。
+
+
+
+### 编写插件
+
+现在，距离一个完整的 demo 还差一件事情，那就是编写一个插件，让它可以跑起来。我们以 `limit-count` 这个限制请求数的插件为例，它的[完整实现](https://github.com/apache/apisix/blob/master/apisix/plugins/limit-count.lua)只有 60 多行代码，你可以点击链接查看。下面，我来详细讲解下其中的关键代码。
+
+
+
+首先，我们要引入 `lua-resty-limit-traffic` ，作为限制请求数的基础库：
+
+```
+local limit_count_new = require("resty.limit.count").new
+```
+
+然后，使用 rapidjson 中的 json schema ，来定义这个插件的参数有哪些：
+
+```
+local schema = {
+    type = "object",
+    properties = {
+        count = {type = "integer", minimum = 0},
+        time_window = {type = "integer", minimum = 0},
+        key = {type = "string",
+        enum = {"remote_addr", "server_addr"},
+        },
+        rejected_code = {type = "integer", minimum = 200, maximum = 600},
+    },
+    additionalProperties = false,
+    required = {"count", "time_window", "key", "rejected_code"},
+}
+
+```
+
+插件的这些参数，和大部分 `resty.limit.count` 的参数是对应的，其中包含了限制的 key、时间窗口的大小、限制的请求数。另外，插件中增加了一个参数: `rejected_code`，在请求被限速的时候返回指定的状态码。
+
+
+
+最后一步，我们**把插件的处理函数挂载到 `rewrite` 阶段**：
+
+```lua
+function _M.rewrite(conf, ctx)
+    -- 从缓存中获取 limit count 的对象，如果没有就使用 `create_limit_obj` 函数新建并缓存 
+    local lim, err = core.lrucache.plugin_ctx(plugin_name, ctx,  create_limit_obj, conf)
+
+    -- 从 ctx.var 中获取 key 的值，并和配置类型和配置版本号一起组成新的 key 
+    local key = (ctx.var[conf.key] or "") .. ctx.conf_type .. ctx.conf_version
+
+    --  进入限制的判断函数
+    local delay, remaining = lim:incoming(key, true)
+    if not delay then
+        local err = remaining
+        -- 如果超过阈值，就返回指定的状态码 
+        if err == "rejected" then
+            return conf.rejected_code
+        end
+
+        core.log.error("failed to limit req: ", err)
+        return 500
+    end
+
+    -- 如果没有超过阈值，就放行，并设置对应响应头 
+    core.response.set_header("X-RateLimit-Limit", conf.count,
+                             "X-RateLimit-Remaining", remaining)
+end
+```
+
+上面的代码中，进行限制判断的逻辑只有一行，其他的都是来做准备工作和设置响应头的。如果没有超过阈值，就会继续按照优先级运行下一个插件。
+
+
+
+### 写在最后
+
+今天这节课，通过整体框架和插件的编写，我们就完成了一个 API 网关的 Demo。更进一步，利用本专栏学到的 OpenResty 知识，你可以在上面继续添砖加瓦，搭建更丰富的功能。
+
+
+
+最后，给你留一个思考题。我们知道，API 网关不仅可以处理七层的流量，也可以处理四层的流量，基于此，你能想到它的一些使用场景吗？
+
+> DeepSeek
+
+API 网关作为流量管理的核心组件，其四层（传输层）和七层（应用层）流量处理能力的结合，可以支持多样化的业务场景。以下是基于不同网络层次的具体应用场景分析：
+
+------
+
+**一、四层（L4）流量处理场景**
+
+四层处理基于 **IP 和端口**，不解析应用层协议（如 HTTP），适合高性能转发和基础流量管控。
+
+1. **TCP/UDP 负载均衡**
+
+- **场景**：游戏服务器、物联网设备通信、数据库集群
+- **实现**：
+  - 将 TCP/UDP 流量分发到后端多个服务器
+  - 支持基于源 IP 的会话保持（如游戏长连接）
+- **优势**：低延迟、高吞吐量，适合对协议无关的纯数据传输
+
+2. **SSL/TLS 终止**
+
+- **场景**：加密流量集中处理（如 HTTPS 服务）
+- **实现**：
+  - 在网关层解密流量后，明文转发到后端服务
+  - 统一管理证书和加密策略
+- **优势**：减轻后端计算压力，简化证书维护
+
+3. **DDoS 防护**
+
+- **场景**：防御 SYN Flood、UDP Flood 等攻击
+- **实现**：
+  - 基于 IP/端口速率限制
+  - 黑白名单过滤
+- **优势**：在网络层拦截恶意流量，保护后端服务
+
+4. **全局流量调度**
+
+- **场景**：多地域数据中心容灾
+- **实现**：
+  - 基于 DNS 或 Anycast 的 IP 层流量引导
+  - 健康检查自动剔除故障节点
+- **示例**：用户访问最近的可用数据中心 IP
+
+------
+
+**二、七层（L7）流量处理场景**
+
+七层处理解析 **应用层协议**（如 HTTP/HTTPS/gRPC），支持精细化的业务逻辑控制。
+
+1. **API 路由与版本控制**
+
+- **场景**：微服务架构的多版本 API 共存
+
+- **实现**：
+
+  ```
+  location /v1/users {
+      proxy_pass http://user-service-v1;
+  }
+  location /v2/users {
+      proxy_pass http://user-service-v2;
+  }
+  ```
+
+- **优势**：无感知切换后端服务版本
+
+2. **鉴权与访问控制**
+
+- **场景**：企业开放平台 API 安全管控
+- **实现**：
+  - JWT/OAuth2.0 验证
+  - 基于 Path/Method 的细粒度权限控制
+- **示例**：拒绝未授权请求访问 `/admin`接口
+
+3. **协议转换**
+
+- **场景**：遗留系统现代化改造
+- **实现**：
+  - 将 HTTP REST 请求转换为 SOAP 协议
+  - gRPC 与 JSON 双向转换
+- **优势**：屏蔽后端协议差异，统一对外接口
+
+4. **实时流量分析**
+
+- **场景**：电商大促期间的异常监控
+- **实现**：
+  - 解析 HTTP 头部和 Body 提取关键字段
+  - 统计接口成功率、延迟等指标
+- **数据**：`GET /product/:id`的 99 分位延迟 ≤50ms
+
+
+
+## 50 | 答疑（五）：如何在工作中引入 OpenResty？
+
+几个月的时间转瞬即逝，到现在，OpenResty 专栏的最后一个版块微服务 API 网关篇，我们就已经学完了。恭喜你没有掉队，始终在积极学习和实践操作，并且热情地留下了你的思考。
+
+很多留言提出的问题很有价值，大部分我都已经在 App 里回复过，一些手机上不方便回复的或者比较典型、有趣的问题，我专门摘了出来，作为今天的答疑内容，集中回复。另一方面，也是为了保证所有人都不漏掉任何一个重点。
+
+
+
+下面我们来看今天的这 5 个问题。
+
+### 问题一：OpenResty 在工作中的使用
+
+Q：快结课了，我也基本上跟下来了，但自己的实践还是偏少（工作中目前未用）。不过，这确实是很强大的一门课。感谢温老师的持续分享，后期工作中我也会择机引入。
+
+
+
+A：感谢这位同学的认可，关于这条留言，我想聊一聊，如何在工作中引入 OpenResty，这确实是一个值得一谈的话题。
+
+OpenResty 基于 Nginx，并在它的基础之上加了 lua-nginx-module 的 C 模块和众多 lua-resty 库，所以 **OpenResty 是可以无痛替换 Nginx 的，这是成本最低的开始使用 OpenResty 的方法**。当然，这个替换过程也是**有风险的**，你需要注意下面这三点。
+
+
+
+第一，确认线上 Nginx 的版本。OpenResty 的主版本号与 Nginx 保持一致，比如 OpenResty 1.15.8.1 使用的就是 Nginx 1.15.8 的内核。如果目前线上 Nginx 的版本号比 OpenResty 的最新版高，那么你最好谨慎换用 OpenResty，毕竟，OpenResty 升级的速度还是比较慢的，离 Nginx 的主线版本要落后半年到一年的时间。如果线上 Nginx 的版本和 OpenResty 的一致或者比 OpenResty 的低，那就具备了升级的前提条件。
+
+第二，测试。测试是最主要的一个环节，使用 OpenResty 替换 Nginx 的风险很低，但肯定也存在一些风险。比如，是否有自定义的 C 模块需要编译，OpenResty 依赖的 openssl 版本，以及 OpenResty 给 Nginx 打的 patch 是否对业务会造成影响等。你需要复制一些业务的流量过来做验证。
+
+第三，流量切换。基本的验证通过后，你还需要线上真实流量的灰度来验证，这时候为了能够快速的回滚，我们可以新开几台服务器来部署 OpenResty，而不是直接替换原有的 Nginx 服务。如果没有问题，我们可以选择二进制文件热升级的方式，或者是从 LB 中逐步摘掉和替换 Nginx 的方式来升级。
+
+
+
+OpenResty 除了可以替代 Nginx 外，另外两个比较容易的切入点是 WAF （Web Application Firewall，Web应用防火墙）和 API 网关，它们都是对性能和动态有比较高要求的场景，也有对应的开源项目可以开箱即用，我在专栏中也有部分涉及到。
+
+再继续把 OpenResty 深入到业务层面的话，就需要考虑比较多技术之外的因素了，比如是否容易招聘到 OpenResty 相关的工程师？是否能够和公司原有的技术系统进行融合等等。
+
+总的来说，从替代 Nginx 的角度来切入，然后慢慢扩散来使用 OpenResty ，是一个不错的注意。
+
+
+
+
+
+### 问题二：OpenResty 的数据库封装
+
+Q：根据你的指点，要尽量少用 `..`字符串拼接，特别是在代码热区。但是我在处理数据库访问时，需要动态构建 SQL 语句（在语句中插入变量），这应该是非常常见的使用场景。可是对于这个需求，我目前感觉，只有字符串拼接是最简单的办法，其他真的想不到既简单又高性能的办法。
+
+
+
+A：你可以先用我们前面课程介绍过的 **SystemTap 或者其他工具分析下，看 SQL 语句的拼接是否是系统的瓶颈**（lua）。如果不是，自然就没有优化的必要性，毕竟，过早的优化是万恶之源。
+
+如果瓶颈确实是  SQL 语句的拼接，那么我们可以利用数据库的 `prepare` 语句来做优化，也可以用数组的方式来做拼接。但 `lua-resrty-mysql` 对 `prepare` 的支持一直处于 TODO 状态，所以只剩下数组拼接的方式了。这也是一些 lua-resty 库的通病，实现了大部分的功能，处于能用的状态，但更新得并不够及时。除了数据库的 `prepare` 语句外，`lua-resty-redis` 对 `cluster` 也一直没有支持。
+
+
+
+字符串拼接，包括 lua-resty 库的这类问题，OpenResty 是希望用 DSL Domain-Specific Language， 领域特定语言）来彻底解决的——使用编译器的技术自动生成数组来拼接字符串，把这些细节隐藏起来，上层的用户不用感知；使用小语言 wirelang 来自动生成各种 lua-resty 网络通信库，不再需要手写。
+
+
+
+这听上去很美好吧？但有一个问题必须正视，那就是自动生成的代码对人类是不友好的。如果你要学习或者修改生成的代码，就必须再学习编译器技术以及一门可能不会开源的 DSL，这会让参与社区的门槛越来越高。
+
+
+
+
+
+### 问题三：OpenResty 的 Web 框架
+
+Q：我现在想用 OpenResty 做一个 Web 项目，但做起来很痛苦，主要是没找到成熟的框架，需要自己造很多轮子，就比如说上面的数据库操作问题（没找到可以动态构建 SQL 语句、连贯操作的类库）。所以想问下老师，在 Web 框架上有什么好的可以推荐吗？
+
+
+
+A：在 `awesome-resty` 这个仓库中，我们可以看到有专门的 [W](https://github.com/bungle/awesome-resty#web-frameworks)[eb 框架分类](https://github.com/bungle/awesome-resty#web-frameworks)，有 20 个 开源项目，不过大部分项目都处于停滞的状态。其中，Lapis、lor 和香草这三个项目你可以尝试下，看看哪一个更适合。
+
+
+
+确实，由于没有强大的 Web 框架作为支撑，OpenResty 在处理大项目的时候就会力不从心，这也是很少有人用 OpenResty 做业务系统的原因之一。
+
+
+
+
+
+### 问题四：修改了响应体，怎么修改响应头中的 content-length？
+
+Q：如果需要修改 respones body 的内容，就只能在 body filter 里做修改，但这样会引起 body 长度与 content-length 长度不一致，应该如何处理呢？
+
+
+
+A：在这种情况下，我们**需要在 body filter 之前的 header filter 阶段中，把 content length 这个响应头置为 nil，不再返回，改为流式输出**。
+
+下面是一段示例代码：
+
+```nginx
+server {
+    listen 8080;
+
+    location /test {
+            proxy_pass http://www.baidu.com;
+            header_filter_by_lua_block {
+                     ngx.header.content_length = nil
+            }
+            body_filter_by_lua_block {
+                    ngx.arg[1] = ngx.arg[1] .. "abc"
+            }
+     }
+}
+
+```
+
+通过这段代码你可以看到，在 body filter 阶段中，`ngx.arg[1]` 代表的就是响应体。如果我们在它后面增加了字符串 `abc`，响应头 content length 就不准确了，所以，我们在 header filter 阶段直接把它禁用掉就可以了。
+
+
+
+另外，从这个示例中，我们还可以看到 OpenResty 的各个阶段之间是如何来配合工作的，这一点也希望你注意并思考。
+
+
+
+### 问题五：Lua 代码的查找路径
+
+Q：`lua_package_path` 似乎配置的是 Lua 依赖的搜索路径。对于`content_by_lua_file`，我试验发现，它只在 prefix 下根据指令提供的文件相对路径去搜索，而不会到 `lua_package_path` 下搜索。不知道我的理解对不对？
+
+
+
+A：这位同学自己动手试验和思考的精神非常值得肯定，并且这个理解也是对的。`lua_package_path` 这个指令是用来加载 Lua 模块而使用的，比如我们在调用 `require 'cjson'` 时，就会到`lua_package_path` 中的指定目录中，去查找 cjson 这个模块。而 `content_by_lua_file` 则不同，它后面跟随的是磁盘中的一个文件路径：
+
+```
+location /test {
+     content_by_lua_file /path/test.lua;
+ }
+```
+
+而且，如果这里不是绝对路径而是相对路径：
+
+```
+ content_by_lua_file path/test.lua;
+```
+
+那么就会使用 OpenResty 启动时指定的 `-p` 目录，来做一个拼接，从而得到绝对路径。
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
